@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 from io import BytesIO
 from rapidfuzz import fuzz
+import re
 
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
@@ -33,13 +34,25 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
+# EXTRACT SIZE + UNIT
+# ==============================
+def extract_size_unit(desc):
+    desc = str(desc).lower()
+
+    match = re.search(r"(\d+)\s?(oz|ml)", desc)
+    if match:
+        return int(match.group(1)), match.group(2).upper()
+
+    return None, None
+
+# ==============================
 # SMART ATTRIBUTE INFERENCE
 # ==============================
 def infer_attributes_full(desc, product_df, product_desc):
     desc_clean = str(desc).lower()
-
-    # Extract brand
     brand = desc_clean.split()[0] if desc_clean else ""
+
+    size, unit_measure = extract_size_unit(desc)
 
     candidates = product_df[
         product_df[product_desc].astype(str).str.lower().str.startswith(brand, na=False)
@@ -60,14 +73,39 @@ def infer_attributes_full(desc, product_df, product_desc):
     def safe_mode(df, col):
         return df[col].mode().iloc[0] if col in df and not df[col].mode().empty else None
 
+    # Step 1: infer group
+    group = safe_mode(top, "Group")
+
+    # Step 2: try exact match (group + size)
+    if size:
+        exact = top[
+            (top["Group"] == group) &
+            (top["Unit2"] == size)
+        ]
+
+        if not exact.empty:
+            row = exact.iloc[0]
+            return {
+                "Type": row.get("Type"),
+                "Family": row.get("Family"),
+                "Group": row.get("Group"),
+                "Products/Case": row.get("Products/Case"),
+                "Units/Product": row.get("Unit"),
+                "Unit Size": row.get("Unit2"),
+                "Unit Measure": row.get("Unit Measure"),
+            }
+
+    # Step 3: fallback to group mode
+    group_rows = top[top["Group"] == group]
+
     return {
         "Type": safe_mode(top, "Type"),
         "Family": safe_mode(top, "Family"),
-        "Group": safe_mode(top, "Group"),
-        "Products/Case": safe_mode(top, "Products/Case"),
-        "Unit": safe_mode(top, "Unit"),
-        "Unit2": safe_mode(top, "Unit2"),
-        "Unit Measure": safe_mode(top, "Unit Measure"),
+        "Group": group,
+        "Products/Case": safe_mode(group_rows, "Products/Case"),
+        "Units/Product": safe_mode(group_rows, "Unit"),
+        "Unit Size": safe_mode(group_rows, "Unit2"),
+        "Unit Measure": safe_mode(group_rows, "Unit Measure"),
     }
 
 # ==============================
@@ -211,21 +249,18 @@ if adm_file and product_file and store_file:
         # OUTPUTS
         status.text("Building outputs...")
 
-        good_df = merged[
-            (merged["Retail UID"].notna()) &
-            (merged["Valid Store-Family"])
-        ][[main_store, "Retail UID"]].drop_duplicates()
-
         unmatched_df = merged[merged["Match Type"] == "No Match"][
             [main_upc, main_desc]
         ].drop_duplicates(subset=[main_upc])
 
         unmatched_df.columns = ["UPC", "Description"]
 
-        # ==============================
-        # ENRICH UNMATCHED
-        # ==============================
-        cols = ["Type", "Family", "Group", "Products/Case", "Unit", "Unit2", "Unit Measure"]
+        # ENRICH
+        cols = [
+            "Type", "Family", "Group",
+            "Products/Case", "Units/Product",
+            "Unit Size", "Unit Measure"
+        ]
 
         for col in cols:
             unmatched_df[col] = None
@@ -240,9 +275,7 @@ if adm_file and product_file and store_file:
             for key, val in attrs.items():
                 unmatched_df.at[i, key] = val
 
-        # ==============================
-        # PRODUCT TEMPLATE
-        # ==============================
+        # TEMPLATE
         product_template = pd.DataFrame()
 
         product_template["ProductId"] = unmatched_df["UPC"]
@@ -259,19 +292,16 @@ if adm_file and product_file and store_file:
         product_template["Active"] = "true"
 
         product_template["Products/Case"] = unmatched_df["Products/Case"]
-        product_template["Unit"] = unmatched_df["Unit"]
-        product_template["Unit2"] = unmatched_df["Unit2"]
+        product_template["Units/Product"] = unmatched_df["Units/Product"]
+        product_template["Unit Size"] = unmatched_df["Unit Size"]
         product_template["Unit Measure"] = unmatched_df["Unit Measure"]
 
         product_template["Family Head"] = "false"
 
-        # ==============================
         # EXPORT
-        # ==============================
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             merged.to_excel(writer, sheet_name="Full Output", index=False)
-            good_df.to_excel(writer, sheet_name="Good To Go", index=False)
             unmatched_df.to_excel(writer, sheet_name="Unmatched", index=False)
             product_template.to_excel(writer, sheet_name="Product Template", index=False)
 
