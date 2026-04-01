@@ -60,6 +60,25 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
     desc_clean = clean_for_matching(desc)
 
+    # 🔥 NEW: VOCAB FILTER (fix edge cases like "washington")
+    product_vocab = set(
+        " ".join(
+            product_df[product_desc_col]
+            .astype(str)
+            .str.lower()
+            .tolist()
+        ).split()
+    )
+
+    desc_words = desc_clean.split()
+
+    filtered_words = [
+        w for w in desc_words if w in product_vocab
+    ]
+
+    if filtered_words:
+        desc_clean = " ".join(filtered_words)
+
     scored = []
 
     # Step 1: find similar products
