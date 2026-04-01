@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from io import BytesIO
 from rapidfuzz import fuzz
 import re
 from collections import Counter
+import tempfile
 
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
@@ -353,27 +353,27 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
-        # EXPORT (BULLETPROOF)
-import tempfile
+        # EXPORT (FIXED - INSIDE BUTTON)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            temp_path = tmp.name
 
-with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-    temp_path = tmp.name
+        with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+            merged.to_excel(writer, sheet_name="Full Output", index=False)
+            summary.to_excel(writer, sheet_name="Summary", index=False)
+            good_df.to_excel(writer, sheet_name="Good To Go", index=False)
+            invalid_df.to_excel(writer, sheet_name="Invalid For Portal", index=False)
+            unmatched_df.to_excel(writer, sheet_name="Unmatched Products", index=False)
+            invalid_sf_df.to_excel(writer, sheet_name="Invalid Store Family", index=False)
+            template_df.to_excel(writer, sheet_name="Product Template", index=False)
 
-with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
-    merged.to_excel(writer, sheet_name="Full Output", index=False)
-    summary.to_excel(writer, sheet_name="Summary", index=False)
-    good_df.to_excel(writer, sheet_name="Good To Go", index=False)
-    invalid_df.to_excel(writer, sheet_name="Invalid For Portal", index=False)
-    unmatched_df.to_excel(writer, sheet_name="Unmatched Products", index=False)
-    invalid_sf_df.to_excel(writer, sheet_name="Invalid Store Family", index=False)
-    template_df.to_excel(writer, sheet_name="Product Template", index=False)
+        with open(temp_path, "rb") as f:
+            file_bytes = f.read()
 
-# Read file back as bytes
-with open(temp_path, "rb") as f:
-    file_bytes = f.read()
+        progress.progress(100)
+        status.text("✅ Done!")
 
-st.download_button(
-    "📥 Download Processed File",
-    data=file_bytes,
-    file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-)
+        st.download_button(
+            "📥 Download Processed File",
+            data=file_bytes,
+            file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        )
