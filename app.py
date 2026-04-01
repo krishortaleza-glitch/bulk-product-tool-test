@@ -29,6 +29,13 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_12"] = s.str.zfill(12)
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
+def safe_mode(df, col):
+    if col not in df.columns or df.empty:
+        return ""
+    if df[col].mode().empty:
+        return ""
+    return df[col].mode().iloc[0]
+
 def parse_pack(desc):
     desc = str(desc).lower()
     group, size, unit = "", "", ""
@@ -79,15 +86,12 @@ if adm_file and product_file and store_file:
     sf_store = st.selectbox("Store Column", sf_df.columns)
     sf_family = st.selectbox("Family Column", sf_df.columns)
 
-    # 🚀 BUTTON
     if st.button("🚀 Process Files"):
 
         st.info("⚙️ Processing started...")
 
         try:
-            # ==============================
             # CLEAN
-            # ==============================
             main_df["desc_clean"] = clean_desc(main_df[main_desc])
             product_df["desc_clean"] = clean_desc(product_df[product_desc])
 
@@ -97,11 +101,7 @@ if adm_file and product_file and store_file:
             product_df = product_df.explode("UPC_list")
             generate_keys(product_df, "UPC_list", "p")
 
-            st.write("✅ Cleaning done")
-
-            # ==============================
             # MATCH
-            # ==============================
             map_12 = product_df.groupby("p_12").agg({
                 product_uid: lambda x: list(set(x)),
                 product_family: lambda x: list(set(x))
@@ -117,11 +117,7 @@ if adm_file and product_file and store_file:
                 lambda x: "UPC Match" if pd.notna(x) else "No Match"
             )
 
-            st.write("✅ Matching done")
-
-            # ==============================
             # UNMATCHED
-            # ==============================
             unmatched_df = merged[merged["Match Type"] == "No Match"][
                 [main_upc, main_desc]
             ].drop_duplicates()
@@ -130,38 +126,56 @@ if adm_file and product_file and store_file:
 
             st.write(f"🔍 Unmatched count: {len(unmatched_df)}")
 
-            # ==============================
-            # PARSE
-            # ==============================
+            # PARSE PACK
             pack = unmatched_df["Description"].apply(parse_pack)
             unmatched_df["Group"] = pack.apply(lambda x: x[0])
             unmatched_df["Unit Size"] = pack.apply(lambda x: x[1])
             unmatched_df["Unit Measure"] = pack.apply(lambda x: x[2])
 
             # ==============================
-            # TEMPLATE
+            # STEP 6: INFERENCE
             # ==============================
+            def infer_config(row):
+                candidates = product_df.copy()
+
+                if "Group" in candidates.columns:
+                    candidates = candidates[candidates["Group"] == row["Group"]]
+
+                if "Unit Size" in candidates.columns and row["Unit Size"]:
+                    candidates = candidates[
+                        candidates["Unit Size"].astype(str) == str(row["Unit Size"])
+                    ]
+
+                return pd.Series({
+                    "Products/Case": safe_mode(candidates, "Products/Case"),
+                    "Units/Product": safe_mode(candidates, "Units/Product"),
+                })
+
+            config = unmatched_df.apply(infer_config, axis=1)
+            unmatched_df["Products/Case"] = config["Products/Case"]
+            unmatched_df["Units/Product"] = config["Units/Product"]
+
+            st.write("✅ Inference complete")
+
+            # TEMPLATE
             template_df = pd.DataFrame({
                 "ProductId": unmatched_df["UPC"],
                 "Product Name": unmatched_df["Description"],
                 "Group": unmatched_df["Group"],
                 "ProductUPC": unmatched_df["UPC"],
                 "Active": "true",
+                "Products/Case": unmatched_df["Products/Case"],
+                "Units/Product": unmatched_df["Units/Product"],
                 "Unit Size": unmatched_df["Unit Size"],
                 "Unit Measure": unmatched_df["Unit Measure"],
                 "Family Head": "false"
             })
 
-            st.write("✅ Template built")
-
-            # ==============================
             # EXPORT
-            # ==============================
             output = BytesIO()
             writer = pd.ExcelWriter(output, engine="openpyxl")
 
             pd.DataFrame({"Status": ["OK"]}).to_excel(writer, sheet_name="Status", index=False)
-
             merged.to_excel(writer, sheet_name="Full Output", index=False)
             unmatched_df.to_excel(writer, sheet_name="Unmatched", index=False)
             template_df.to_excel(writer, sheet_name="Product Template", index=False)
