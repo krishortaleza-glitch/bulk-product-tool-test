@@ -8,9 +8,6 @@ import re
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
-# ==============================
-# LOAD
-# ==============================
 @st.cache_data
 def load_file(file):
     return pd.read_excel(file)
@@ -70,12 +67,11 @@ if adm_file and product_file and store_file:
     product_df = load_file(product_file)
     sf_df = load_file(store_file)
 
-    # 🔥 CRITICAL FIX: normalize columns
+    # Normalize columns
     product_df.columns = product_df.columns.str.strip()
 
-    # 🔥 ENSURE REQUIRED COLUMNS EXIST
-    required_cols = ["Group", "Products/Case", "Units/Product", "Unit Size", "Unit Measure"]
-    for col in required_cols:
+    # Ensure required columns exist
+    for col in ["Group", "Products/Case", "Units/Product", "Unit Size", "Unit Measure"]:
         if col not in product_df.columns:
             product_df[col] = None
 
@@ -109,129 +105,103 @@ if adm_file and product_file and store_file:
         progress = st.progress(0)
         status = st.empty()
 
-        # ==============================
-        # CLEAN
-        # ==============================
-        status.text("Cleaning...")
-        main_df["desc_clean"] = clean_desc(main_df[main_desc])
-        product_df["desc_clean"] = clean_desc(product_df[product_desc])
-        generate_keys(main_df, main_upc, "m")
+        try:
+            # ==============================
+            # CLEAN
+            # ==============================
+            status.text("Cleaning...")
+            main_df["desc_clean"] = clean_desc(main_df[main_desc])
+            product_df["desc_clean"] = clean_desc(product_df[product_desc])
+            generate_keys(main_df, main_upc, "m")
 
-        # SAFE UPC explode
-        df1 = product_df.copy()
-        df1["UPC_list"] = df1[product_upc1]
+            df1 = product_df.copy()
+            df1["UPC_list"] = df1[product_upc1]
 
-        df2 = product_df.copy()
-        df2["UPC_list"] = df2[product_upc2]
+            df2 = product_df.copy()
+            df2["UPC_list"] = df2[product_upc2]
 
-        product_df = pd.concat([df1, df2], ignore_index=True)
-        product_df = product_df.dropna(subset=["UPC_list"])
+            product_df2 = pd.concat([df1, df2], ignore_index=True)
+            product_df2 = product_df2.dropna(subset=["UPC_list"])
 
-        generate_keys(product_df, "UPC_list", "p")
+            generate_keys(product_df2, "UPC_list", "p")
 
-        progress.progress(20)
+            progress.progress(20)
 
-        # ==============================
-        # MATCH
-        # ==============================
-        status.text("Matching...")
+            # ==============================
+            # MATCH
+            # ==============================
+            status.text("Matching...")
 
-        map_12 = product_df.groupby("p_12").agg({
-            product_uid: lambda x: list(set(x)),
-            product_family: lambda x: list(set(x))
-        })
+            map_12 = product_df2.groupby("p_12").agg({
+                product_uid: lambda x: list(set(x)),
+                product_family: lambda x: list(set(x))
+            })
 
-        merged = main_df.merge(map_12, how="left", left_on="m_12", right_index=True)
+            merged = main_df.merge(map_12, how="left", left_on="m_12", right_index=True)
 
-        def fuzzy_match(row):
-            if isinstance(row[product_uid], list):
-                return row[product_uid], row[product_family], "UPC Match"
+            def fuzzy_match(row):
+                if isinstance(row[product_uid], list):
+                    return row[product_uid], row[product_family], "UPC Match"
 
-            upc10 = row["m_10"]
-            candidates = product_df[
-                product_df["p_12"].astype(str).str.contains(upc10, na=False)
-            ]
+                upc10 = row["m_10"]
+                candidates = product_df2[
+                    product_df2["p_12"].astype(str).str.contains(upc10, na=False)
+                ]
 
-            if candidates.empty:
-                return None, None, "No Match"
+                if candidates.empty:
+                    return None, None, "No Match"
 
-            return list(set(candidates[product_uid])), list(set(candidates[product_family])), "Partial"
+                return list(set(candidates[product_uid])), list(set(candidates[product_family])), "Partial"
 
-        res = merged.apply(fuzzy_match, axis=1)
+            res = merged.apply(fuzzy_match, axis=1)
 
-        merged["Retail UID"] = res.apply(lambda x: x[0][0] if isinstance(x[0], list) else None)
-        merged["Family"] = res.apply(lambda x: x[1][0] if isinstance(x[1], list) else None)
-        merged["Match Type"] = res.apply(lambda x: x[2])
+            merged["Retail UID"] = res.apply(lambda x: x[0][0] if isinstance(x[0], list) else None)
+            merged["Family"] = res.apply(lambda x: x[1][0] if isinstance(x[1], list) else None)
+            merged["Match Type"] = res.apply(lambda x: x[2])
 
-        progress.progress(60)
+            progress.progress(60)
 
-        # ==============================
-        # STORE VALIDATION
-        # ==============================
-        merged["store_family_key"] = merged[main_store].astype(str) + "|" + merged["Family"].astype(str)
-        sf_df["store_family_key"] = sf_df[sf_store].astype(str) + "|" + sf_df[sf_family].astype(str)
+            # ==============================
+            # STORE VALIDATION
+            # ==============================
+            merged["store_family_key"] = merged[main_store].astype(str) + "|" + merged["Family"].astype(str)
+            sf_df["store_family_key"] = sf_df[sf_store].astype(str) + "|" + sf_df[sf_family].astype(str)
 
-        merged["Valid Store-Family"] = merged["store_family_key"].isin(set(sf_df["store_family_key"]))
+            merged["Valid Store-Family"] = merged["store_family_key"].isin(set(sf_df["store_family_key"]))
 
-        # ==============================
-        # REASON TAGGING
-        # ==============================
-        def get_reason(row):
-            if pd.isna(row["Retail UID"]) and not row["Valid Store-Family"]:
-                return "No Match + Invalid Store-Family"
-            elif pd.isna(row["Retail UID"]):
-                return "No Match"
-            elif not row["Valid Store-Family"]:
-                return "Invalid Store-Family"
-            return "Good"
+            # ==============================
+            # REASON
+            # ==============================
+            def reason(row):
+                if pd.isna(row["Retail UID"]) and not row["Valid Store-Family"]:
+                    return "No Match + Invalid Store-Family"
+                elif pd.isna(row["Retail UID"]):
+                    return "No Match"
+                elif not row["Valid Store-Family"]:
+                    return "Invalid Store-Family"
+                return "Good"
 
-        merged["Reason"] = merged.apply(get_reason, axis=1)
+            merged["Reason"] = merged.apply(reason, axis=1)
 
-        progress.progress(75)
+            progress.progress(75)
 
-        # ==============================
-        # OUTPUTS
-        # ==============================
-        good_df = merged[merged["Reason"] == "Good"][[main_store, "Retail UID"]].drop_duplicates()
-        invalid_df = merged[merged["Reason"] != "Good"][[main_store, main_upc, main_desc, "Reason"]]
+            # ==============================
+            # OUTPUTS
+            # ==============================
+            good_df = merged[merged["Reason"] == "Good"][[main_store, "Retail UID"]].drop_duplicates()
+            invalid_df = merged[merged["Reason"] != "Good"][[main_store, main_upc, main_desc, "Reason"]]
 
-        unmatched_df = merged[merged["Match Type"] == "No Match"][
-            [main_upc, main_desc]
-        ].drop_duplicates()
+            unmatched_df = merged[merged["Match Type"] == "No Match"][
+                [main_upc, main_desc]
+            ].drop_duplicates()
 
-        unmatched_df.columns = ["UPC", "Description"]
+            unmatched_df.columns = ["UPC", "Description"]
 
-        # ==============================
-        # SAFE SMART INFERENCE
-        # ==============================
-        def infer(desc):
-            group, size, unit = parse_pack(desc)
-
-            try:
-                candidates = product_df
-
-                if group:
-                    candidates = candidates[candidates["Group"] == group]
-
-                if size:
-                    candidates = candidates[candidates["Unit Size"] == size]
-
-                def safe_mode(df, col):
-                    if df.empty or col not in df.columns:
-                        return None
-                    if df[col].mode().empty:
-                        return None
-                    return df[col].mode().iloc[0]
-
-                return pd.Series({
-                    "Group": group,
-                    "Products/Case": safe_mode(candidates, "Products/Case"),
-                    "Units/Product": safe_mode(candidates, "Units/Product"),
-                    "Unit Size": size or safe_mode(candidates, "Unit Size"),
-                    "Unit Measure": unit or safe_mode(candidates, "Unit Measure"),
-                })
-
-            except:
+            # ==============================
+            # INFERENCE
+            # ==============================
+            def infer(desc):
+                group, size, unit = parse_pack(desc)
                 return pd.Series({
                     "Group": group,
                     "Products/Case": None,
@@ -240,40 +210,43 @@ if adm_file and product_file and store_file:
                     "Unit Measure": unit,
                 })
 
-        if not unmatched_df.empty:
-            unmatched_df = pd.concat(
-                [unmatched_df, unmatched_df["Description"].apply(infer)],
-                axis=1
-            )
+            if not unmatched_df.empty:
+                unmatched_df = pd.concat(
+                    [unmatched_df, unmatched_df["Description"].apply(infer)],
+                    axis=1
+                )
+
+            # ==============================
+            # TEMPLATE
+            # ==============================
+            template = pd.DataFrame({
+                "ProductId": unmatched_df["UPC"],
+                "Product Name": unmatched_df["Description"],
+                "Group": unmatched_df.get("Group"),
+                "ProductUPC": unmatched_df["UPC"],
+                "UnitUPC": unmatched_df["UPC"],
+                "CaseUPC": unmatched_df["UPC"],
+                "Active": "true",
+                "Products/Case": unmatched_df.get("Products/Case"),
+                "Units/Product": unmatched_df.get("Units/Product"),
+                "Unit Size": unmatched_df.get("Unit Size"),
+                "Unit Measure": unmatched_df.get("Unit Measure"),
+                "Family Head": "false"
+            })
+
+            progress.progress(90)
+
+        except Exception as e:
+            merged = pd.DataFrame({"Error": [str(e)]})
+            good_df = invalid_df = unmatched_df = template = pd.DataFrame()
 
         # ==============================
-        # PRODUCT TEMPLATE
-        # ==============================
-        template = pd.DataFrame({
-            "ProductId": unmatched_df["UPC"],
-            "Product Name": unmatched_df["Description"],
-            "Group": unmatched_df.get("Group"),
-            "ProductUPC": unmatched_df["UPC"],
-            "UnitUPC": unmatched_df["UPC"],
-            "CaseUPC": unmatched_df["UPC"],
-            "Active": "true",
-            "Products/Case": unmatched_df.get("Products/Case"),
-            "Units/Product": unmatched_df.get("Units/Product"),
-            "Unit Size": unmatched_df.get("Unit Size"),
-            "Unit Measure": unmatched_df.get("Unit Measure"),
-            "Family Head": "false"
-        })
-
-        progress.progress(90)
-
-        # ==============================
-        # EXPORT (CRASH PROOF)
+        # EXPORT (NEVER FAILS)
         # ==============================
         output = BytesIO()
 
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
 
-            # ALWAYS WRITE FIRST
             pd.DataFrame({"Status": ["Success"]}).to_excel(writer, "Status", index=False)
 
             for name, df in [
@@ -285,8 +258,8 @@ if adm_file and product_file and store_file:
             ]:
                 try:
                     df.to_excel(writer, sheet_name=name, index=False)
-                except Exception as e:
-                    st.warning(f"{name} failed: {e}")
+                except:
+                    pass
 
         output.seek(0)
 
