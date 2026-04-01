@@ -3,13 +3,12 @@ import pandas as pd
 from datetime import datetime
 from io import BytesIO
 from rapidfuzz import fuzz
-import time
 
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
 # ==============================
-# CACHED FILE LOADING
+# CACHE
 # ==============================
 @st.cache_data
 def load_file(file):
@@ -32,6 +31,44 @@ def generate_keys(df, col, prefix):
     s = clean_upc(df[col])
     df[f"{prefix}_12"] = s.str.zfill(12)
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
+
+# ==============================
+# SMART ATTRIBUTE INFERENCE
+# ==============================
+def infer_attributes_full(desc, product_df, product_desc):
+    desc_clean = str(desc).lower()
+
+    # Extract brand
+    brand = desc_clean.split()[0] if desc_clean else ""
+
+    candidates = product_df[
+        product_df[product_desc].astype(str).str.lower().str.startswith(brand, na=False)
+    ].copy()
+
+    if candidates.empty:
+        return {}
+
+    candidates["score"] = candidates[product_desc].apply(
+        lambda x: fuzz.partial_ratio(desc_clean, str(x).lower())
+    )
+
+    top = candidates[candidates["score"] >= 75]
+
+    if top.empty:
+        return {}
+
+    def safe_mode(df, col):
+        return df[col].mode().iloc[0] if col in df and not df[col].mode().empty else None
+
+    return {
+        "Type": safe_mode(top, "Type"),
+        "Family": safe_mode(top, "Family"),
+        "Group": safe_mode(top, "Group"),
+        "Products/Case": safe_mode(top, "Products/Case"),
+        "Unit": safe_mode(top, "Unit"),
+        "Unit2": safe_mode(top, "Unit2"),
+        "Unit Measure": safe_mode(top, "Unit Measure"),
+    }
 
 # ==============================
 # UI
@@ -73,20 +110,16 @@ if adm_file and product_file and store_file:
         sf_store = st.selectbox("Store Column", sf_df.columns)
         sf_family = st.selectbox("Family Column", sf_df.columns)
 
-    st.info("Select columns, then click Process")
-
-    # ==============================
-    # PROCESS BUTTON
-    # ==============================
     if st.button("🚀 Process Files"):
 
         progress = st.progress(0)
         status = st.empty()
 
-        # STEP 1: CLEAN DATA
-        status.text("🔄 Cleaning data...")
+        # CLEAN
+        status.text("Cleaning data...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
+
         generate_keys(main_df, main_upc, "m")
 
         product_df["UPC_list"] = product_df[[product_upc1, product_upc2]].values.tolist()
@@ -95,8 +128,8 @@ if adm_file and product_file and store_file:
 
         progress.progress(20)
 
-        # STEP 2: EXACT MATCH
-        status.text("🔎 Matching exact UPCs...")
+        # EXACT MATCH
+        status.text("Matching UPCs...")
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
             product_family: lambda x: list(set(x))
@@ -108,9 +141,8 @@ if adm_file and product_file and store_file:
 
         progress.progress(40)
 
-        # STEP 3: FUZZY MATCH
-        status.text("🧠 Running smart matching...")
-        product_df["p_12_str"] = product_df["p_12"].astype(str)
+        # FUZZY MATCH
+        status.text("Fuzzy matching...")
 
         def fuzzy_match(row):
             if isinstance(row["All Retail UIDs"], list):
@@ -120,23 +152,28 @@ if adm_file and product_file and store_file:
             desc = row["desc_clean"]
 
             candidates = product_df[
-                product_df["p_12_str"].str.contains(upc10, na=False)
+                product_df["p_12"].astype(str).str.contains(upc10, na=False)
             ]
 
-            best_score = 0
-            all_uids, all_families = [], []
-
-            for _, r in candidates.iterrows():
-                score = fuzz.partial_ratio(desc, r["desc_clean"])
-                if score >= 70:
-                    all_uids.append(r[product_uid])
-                    all_families.append(r[product_family])
-                    best_score = max(best_score, score)
-
-            if not all_uids:
+            if candidates.empty:
                 return None, None, 0, "No Match"
 
-            return list(set(all_uids)), list(set(all_families)), best_score, "10-digit Fuzzy Match"
+            candidates = candidates.copy()
+            candidates["score"] = candidates["desc_clean"].apply(
+                lambda x: fuzz.partial_ratio(desc, x)
+            )
+
+            filtered = candidates[candidates["score"] >= 70]
+
+            if filtered.empty:
+                return None, None, 0, "No Match"
+
+            return (
+                list(set(filtered[product_uid])),
+                list(set(filtered[product_family])),
+                filtered["score"].max(),
+                "10-digit Fuzzy Match"
+            )
 
         results = merged.apply(fuzzy_match, axis=1)
 
@@ -147,8 +184,9 @@ if adm_file and product_file and store_file:
 
         progress.progress(70)
 
-        # STEP 4: STORE VALIDATION
-        status.text("🏪 Validating store-family...")
+        # STORE VALIDATION
+        status.text("Validating store-family...")
+
         merged["Retail UID"] = merged["All Retail UIDs"].apply(
             lambda x: x[0] if isinstance(x, list) else None
         )
@@ -170,50 +208,80 @@ if adm_file and product_file and store_file:
 
         progress.progress(85)
 
-        # STEP 5: OUTPUT
-        status.text("📊 Building output...")
+        # OUTPUTS
+        status.text("Building outputs...")
 
         good_df = merged[
             (merged["Retail UID"].notna()) &
             (merged["Valid Store-Family"])
         ][[main_store, "Retail UID"]].drop_duplicates()
-        good_df.columns = ["Store", "Retail UID"]
-
-        invalid_df = merged[
-            (merged["Retail UID"].isna()) |
-            (~merged["Valid Store-Family"])
-        ][[main_store, main_upc, main_desc]]
-        invalid_df.columns = ["Store", "UPC", "Description"]
 
         unmatched_df = merged[merged["Match Type"] == "No Match"][
             [main_upc, main_desc]
-        ]
+        ].drop_duplicates(subset=[main_upc])
+
         unmatched_df.columns = ["UPC", "Description"]
 
-        invalid_sf_df = merged[~merged["Valid Store-Family"]][
-            [main_store, "Family"]
-        ].drop_duplicates()
-        invalid_sf_df.columns = ["Store", "Family"]
+        # ==============================
+        # ENRICH UNMATCHED
+        # ==============================
+        cols = ["Type", "Family", "Group", "Products/Case", "Unit", "Unit2", "Unit Measure"]
 
-        summary = merged["Match Type"].value_counts().reset_index()
-        summary.columns = ["Match Type", "Count"]
+        for col in cols:
+            unmatched_df[col] = None
 
+        for i, row in unmatched_df.iterrows():
+            attrs = infer_attributes_full(
+                row["Description"],
+                product_df,
+                product_desc
+            )
+
+            for key, val in attrs.items():
+                unmatched_df.at[i, key] = val
+
+        # ==============================
+        # PRODUCT TEMPLATE
+        # ==============================
+        product_template = pd.DataFrame()
+
+        product_template["ProductId"] = unmatched_df["UPC"]
+        product_template["Product Name"] = unmatched_df["Description"]
+
+        product_template["Type"] = unmatched_df["Type"]
+        product_template["Family"] = unmatched_df["Family"]
+        product_template["Group"] = unmatched_df["Group"]
+
+        product_template["ProductUPC"] = unmatched_df["UPC"]
+        product_template["UnitUPC"] = unmatched_df["UPC"]
+        product_template["CaseUPC"] = unmatched_df["UPC"]
+
+        product_template["Active"] = "true"
+
+        product_template["Products/Case"] = unmatched_df["Products/Case"]
+        product_template["Unit"] = unmatched_df["Unit"]
+        product_template["Unit2"] = unmatched_df["Unit2"]
+        product_template["Unit Measure"] = unmatched_df["Unit Measure"]
+
+        product_template["Family Head"] = "false"
+
+        # ==============================
+        # EXPORT
+        # ==============================
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             merged.to_excel(writer, sheet_name="Full Output", index=False)
-            summary.to_excel(writer, sheet_name="Summary", index=False)
             good_df.to_excel(writer, sheet_name="Good To Go", index=False)
-            invalid_df.to_excel(writer, sheet_name="Invalid For Portal", index=False)
-            unmatched_df.to_excel(writer, sheet_name="Unmatched Products", index=False)
-            invalid_sf_df.to_excel(writer, sheet_name="Invalid Store Family", index=False)
+            unmatched_df.to_excel(writer, sheet_name="Unmatched", index=False)
+            product_template.to_excel(writer, sheet_name="Product Template", index=False)
 
         output.seek(0)
 
         progress.progress(100)
-        status.text("✅ Done!")
+        status.text("Done!")
 
         st.download_button(
-            "📥 Download Processed File",
+            "📥 Download File",
             data=output,
             file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         )
