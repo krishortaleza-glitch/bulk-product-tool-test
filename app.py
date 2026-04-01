@@ -53,15 +53,23 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# 🔥 FAMILY + TYPE INFERENCE
+# 🔥 BRAND PHRASE LOGIC
 # ==============================
-def get_brand(desc):
+def get_brand_phrase(desc):
     words = desc.split()
+
+    # Use first 2 words (key improvement)
+    if len(words) >= 2:
+        return " ".join(words[:2])
+
     return words[0] if words else ""
 
+# ==============================
+# 🔥 FAMILY + TYPE INFERENCE
+# ==============================
 def extract_family(desc, product_df, family_col):
     desc_clean = clean_for_matching(desc)
-    brand = get_brand(desc_clean)
+    brand_phrase = get_brand_phrase(desc_clean)
 
     families = product_df[family_col].dropna().unique()
 
@@ -71,8 +79,8 @@ def extract_family(desc, product_df, family_col):
     for fam in families:
         fam_clean = clean_for_matching(fam)
 
-        # Brand filter
-        if brand and brand not in fam_clean:
+        # 🔥 STRONG FILTER (phrase-based)
+        if brand_phrase and brand_phrase not in fam_clean:
             continue
 
         # Multi scoring
@@ -81,13 +89,27 @@ def extract_family(desc, product_df, family_col):
 
         score = max(score1, score2)
 
-        # Boost if exact phrase appears
+        # Boost exact phrase match
         if fam_clean in desc_clean:
             score += 10
 
         if score > best_score:
             best_score = score
             best_match = fam
+
+    # fallback: if nothing matched phrase, try broader match
+    if not best_match:
+        for fam in families:
+            fam_clean = clean_for_matching(fam)
+
+            score = max(
+                fuzz.token_set_ratio(desc_clean, fam_clean),
+                fuzz.partial_ratio(desc_clean, fam_clean)
+            )
+
+            if score > best_score:
+                best_score = score
+                best_match = fam
 
     if best_score >= 75:
         return best_match
