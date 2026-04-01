@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from io import BytesIO
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 import re
 
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
@@ -34,78 +34,125 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# EXTRACT SIZE + UNIT
+# PARSE PACK (GROUP + SIZE)
 # ==============================
-def extract_size_unit(desc):
+def parse_pack(desc):
     desc = str(desc).lower()
 
-    match = re.search(r"(\d+)\s?(oz|ml)", desc)
+    group, size, unit = None, None, None
+
+    # 6/12, 24/200ml
+    match = re.search(r"(\d+)\s*/\s*(\d+)\s*(oz|ml)?", desc)
     if match:
-        return int(match.group(1)), match.group(2).upper()
+        group = f"{match.group(1)}pk"
+        size = int(match.group(2))
+        if match.group(3):
+            unit = match.group(3).upper()
 
-    return None, None
+    # 12pk 12oz
+    if not group:
+        match = re.search(r"(\d+)\s*pk.*?(\d+)\s*(oz|ml)", desc)
+        if match:
+            group = f"{match.group(1)}pk"
+            size = int(match.group(2))
+            unit = match.group(3).upper()
+
+    # fallback size
+    if not size:
+        match = re.search(r"(\d+)\s*(oz|ml)", desc)
+        if match:
+            size = int(match.group(1))
+            unit = match.group(2).upper()
+
+    # fallback group
+    if not group:
+        match = re.search(r"(\d+)\s*pk", desc)
+        if match:
+            group = f"{match.group(1)}pk"
+
+    return group, size, unit
 
 # ==============================
-# SMART ATTRIBUTE INFERENCE
+# BUILD MULTI-WORD BRAND LIST
 # ==============================
-def infer_attributes_full(desc, product_df, product_desc):
+def extract_brand_phrase(desc):
+    words = str(desc).lower().split()
+    return " ".join(words[:3])
+
+# ==============================
+# BRAND DETECTION
+# ==============================
+def detect_brand(desc, brand_list):
     desc_clean = str(desc).lower()
-    brand = desc_clean.split()[0] if desc_clean else ""
 
-    size, unit_measure = extract_size_unit(desc)
+    sorted_brands = sorted(brand_list, key=lambda x: -len(x))
 
-    candidates = product_df[
-        product_df[product_desc].astype(str).str.lower().str.startswith(brand, na=False)
-    ].copy()
+    for brand in sorted_brands:
+        if brand in desc_clean:
+            return brand
 
-    if candidates.empty:
-        return {}
+    match = process.extractOne(desc_clean, brand_list, scorer=fuzz.partial_ratio)
+    if match and match[1] >= 85:
+        return match[0]
 
-    candidates["score"] = candidates[product_desc].apply(
-        lambda x: fuzz.partial_ratio(desc_clean, str(x).lower())
-    )
+    return None
 
-    top = candidates[candidates["score"] >= 75]
+# ==============================
+# INFERENCE FUNCTION
+# ==============================
+def infer_attributes_full(desc, product_df, product_desc, group_size_map, brand_list):
+    desc_clean = str(desc).lower()
 
-    if top.empty:
-        return {}
+    group, size, unit = parse_pack(desc_clean)
+    brand = detect_brand(desc_clean, brand_list)
+
+    # GROUP + SIZE match
+    if group and size:
+        config = group_size_map.get((group, size))
+        if config:
+            return {
+                "Type": None,
+                "Family": None,
+                "Group": group,
+                "Products/Case": config.get("Products/Case"),
+                "Units/Product": config.get("Unit"),
+                "Unit Size": size,
+                "Unit Measure": config.get("Unit Measure") or unit,
+            }
+
+    # fallback group only
+    group_rows = product_df[product_df["Group"] == group]
 
     def safe_mode(df, col):
         return df[col].mode().iloc[0] if col in df and not df[col].mode().empty else None
 
-    # Step 1: infer group
-    group = safe_mode(top, "Group")
+    # fuzzy for type/family
+    if brand:
+        candidates = product_df[
+            product_df[product_desc].astype(str).str.lower().str.contains(brand, na=False)
+        ].copy()
 
-    # Step 2: try exact match (group + size)
-    if size:
-        exact = top[
-            (top["Group"] == group) &
-            (top["Unit2"] == size)
-        ]
+        if not candidates.empty:
+            candidates["score"] = candidates[product_desc].apply(
+                lambda x: fuzz.partial_ratio(desc_clean, str(x).lower())
+            )
+            top = candidates[candidates["score"] >= 75]
 
-        if not exact.empty:
-            row = exact.iloc[0]
-            return {
-                "Type": row.get("Type"),
-                "Family": row.get("Family"),
-                "Group": row.get("Group"),
-                "Products/Case": row.get("Products/Case"),
-                "Units/Product": row.get("Unit"),
-                "Unit Size": row.get("Unit2"),
-                "Unit Measure": row.get("Unit Measure"),
-            }
-
-    # Step 3: fallback to group mode
-    group_rows = top[top["Group"] == group]
+            type_val = safe_mode(top, "Type")
+            family_val = safe_mode(top, "Family")
+        else:
+            type_val, family_val = None, None
+    else:
+        type_val, family_val = None, None
 
     return {
-        "Type": safe_mode(top, "Type"),
-        "Family": safe_mode(top, "Family"),
+        "Type": type_val,
+        "Family": family_val,
         "Group": group,
         "Products/Case": safe_mode(group_rows, "Products/Case"),
         "Units/Product": safe_mode(group_rows, "Unit"),
-        "Unit Size": safe_mode(group_rows, "Unit2"),
-        "Unit Measure": safe_mode(group_rows, "Unit Measure"),
+        "Unit Size": size or safe_mode(group_rows, "Unit2"),
+        "Unit Measure": unit or safe_mode(group_rows, "Unit Measure"),
     }
 
 # ==============================
@@ -125,11 +172,7 @@ if adm_file and product_file and store_file:
 
     st.success("Files loaded")
 
-    # ==============================
     # COLUMN SELECTORS
-    # ==============================
-    st.header("Select Columns")
-
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -150,11 +193,7 @@ if adm_file and product_file and store_file:
 
     if st.button("🚀 Process Files"):
 
-        progress = st.progress(0)
-        status = st.empty()
-
         # CLEAN
-        status.text("Cleaning data...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
 
@@ -164,10 +203,18 @@ if adm_file and product_file and store_file:
         product_df = product_df.explode("UPC_list")
         generate_keys(product_df, "UPC_list", "p")
 
-        progress.progress(20)
+        # BRAND LIST
+        product_df["brand_phrase"] = product_df[product_desc].apply(extract_brand_phrase)
+        brand_list = product_df["brand_phrase"].dropna().value_counts().head(300).index.tolist()
+
+        # GROUP+SIZE MAP
+        group_size_map = product_df.groupby(["Group", "Unit2"]).agg({
+            "Products/Case": lambda x: x.mode().iloc[0] if not x.mode().empty else None,
+            "Unit": lambda x: x.mode().iloc[0] if not x.mode().empty else None,
+            "Unit Measure": lambda x: x.mode().iloc[0] if not x.mode().empty else None,
+        }).to_dict("index")
 
         # EXACT MATCH
-        status.text("Matching UPCs...")
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
             product_family: lambda x: list(set(x))
@@ -177,41 +224,12 @@ if adm_file and product_file and store_file:
         merged["All Retail UIDs"] = merged[product_uid]
         merged["All Families"] = merged[product_family]
 
-        progress.progress(40)
-
         # FUZZY MATCH
-        status.text("Fuzzy matching...")
-
         def fuzzy_match(row):
             if isinstance(row["All Retail UIDs"], list):
                 return row["All Retail UIDs"], row["All Families"], 100, "UPC Match"
 
-            upc10 = row["m_10"]
-            desc = row["desc_clean"]
-
-            candidates = product_df[
-                product_df["p_12"].astype(str).str.contains(upc10, na=False)
-            ]
-
-            if candidates.empty:
-                return None, None, 0, "No Match"
-
-            candidates = candidates.copy()
-            candidates["score"] = candidates["desc_clean"].apply(
-                lambda x: fuzz.partial_ratio(desc, x)
-            )
-
-            filtered = candidates[candidates["score"] >= 70]
-
-            if filtered.empty:
-                return None, None, 0, "No Match"
-
-            return (
-                list(set(filtered[product_uid])),
-                list(set(filtered[product_family])),
-                filtered["score"].max(),
-                "10-digit Fuzzy Match"
-            )
+            return None, None, 0, "No Match"
 
         results = merged.apply(fuzzy_match, axis=1)
 
@@ -220,11 +238,7 @@ if adm_file and product_file and store_file:
         merged["Match Score"] = results.apply(lambda x: x[2])
         merged["Match Type"] = results.apply(lambda x: x[3])
 
-        progress.progress(70)
-
         # STORE VALIDATION
-        status.text("Validating store-family...")
-
         merged["Retail UID"] = merged["All Retail UIDs"].apply(
             lambda x: x[0] if isinstance(x, list) else None
         )
@@ -244,11 +258,36 @@ if adm_file and product_file and store_file:
         valid_keys = set(sf_df["store_family_key"])
         merged["Valid Store-Family"] = merged["store_family_key"].isin(valid_keys)
 
-        progress.progress(85)
+        # REASON TAGGING
+        def get_reason(row):
+            if pd.isna(row["Retail UID"]) and not row["Valid Store-Family"]:
+                return "No Match + Invalid Store-Family"
+            elif pd.isna(row["Retail UID"]):
+                return "No Match"
+            elif not row["Valid Store-Family"]:
+                return "Invalid Store-Family"
+            return None
+
+        merged["Reason Detail"] = merged.apply(get_reason, axis=1)
 
         # OUTPUTS
-        status.text("Building outputs...")
+        good_df = merged[
+            (merged["Retail UID"].notna()) &
+            (merged["Valid Store-Family"])
+        ]
 
+        invalid_df = merged[
+            (merged["Retail UID"].isna()) |
+            (~merged["Valid Store-Family"])
+        ][[main_store, main_upc, main_desc, "Reason Detail"]]
+
+        invalid_df.columns = ["Store", "UPC", "Description", "Reason"]
+
+        invalid_sf_df = merged[~merged["Valid Store-Family"]][
+            [main_store, "Family"]
+        ].drop_duplicates()
+
+        # UNMATCHED
         unmatched_df = merged[merged["Match Type"] == "No Match"][
             [main_upc, main_desc]
         ].drop_duplicates(subset=[main_upc])
@@ -256,12 +295,7 @@ if adm_file and product_file and store_file:
         unmatched_df.columns = ["UPC", "Description"]
 
         # ENRICH
-        cols = [
-            "Type", "Family", "Group",
-            "Products/Case", "Units/Product",
-            "Unit Size", "Unit Measure"
-        ]
-
+        cols = ["Type", "Family", "Group", "Products/Case", "Units/Product", "Unit Size", "Unit Measure"]
         for col in cols:
             unmatched_df[col] = None
 
@@ -269,46 +303,42 @@ if adm_file and product_file and store_file:
             attrs = infer_attributes_full(
                 row["Description"],
                 product_df,
-                product_desc
+                product_desc,
+                group_size_map,
+                brand_list
             )
-
-            for key, val in attrs.items():
-                unmatched_df.at[i, key] = val
+            for k, v in attrs.items():
+                unmatched_df.at[i, k] = v
 
         # TEMPLATE
-        product_template = pd.DataFrame()
-
-        product_template["ProductId"] = unmatched_df["UPC"]
-        product_template["Product Name"] = unmatched_df["Description"]
-
-        product_template["Type"] = unmatched_df["Type"]
-        product_template["Family"] = unmatched_df["Family"]
-        product_template["Group"] = unmatched_df["Group"]
-
-        product_template["ProductUPC"] = unmatched_df["UPC"]
-        product_template["UnitUPC"] = unmatched_df["UPC"]
-        product_template["CaseUPC"] = unmatched_df["UPC"]
-
-        product_template["Active"] = "true"
-
-        product_template["Products/Case"] = unmatched_df["Products/Case"]
-        product_template["Units/Product"] = unmatched_df["Units/Product"]
-        product_template["Unit Size"] = unmatched_df["Unit Size"]
-        product_template["Unit Measure"] = unmatched_df["Unit Measure"]
-
-        product_template["Family Head"] = "false"
+        product_template = pd.DataFrame({
+            "ProductId": unmatched_df["UPC"],
+            "Product Name": unmatched_df["Description"],
+            "Type": unmatched_df["Type"],
+            "Family": unmatched_df["Family"],
+            "Group": unmatched_df["Group"],
+            "ProductUPC": unmatched_df["UPC"],
+            "UnitUPC": unmatched_df["UPC"],
+            "CaseUPC": unmatched_df["UPC"],
+            "Active": "true",
+            "Products/Case": unmatched_df["Products/Case"],
+            "Units/Product": unmatched_df["Units/Product"],
+            "Unit Size": unmatched_df["Unit Size"],
+            "Unit Measure": unmatched_df["Unit Measure"],
+            "Family Head": "false"
+        })
 
         # EXPORT
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             merged.to_excel(writer, sheet_name="Full Output", index=False)
+            good_df.to_excel(writer, sheet_name="Good To Go", index=False)
+            invalid_df.to_excel(writer, sheet_name="Invalid For Portal", index=False)
+            invalid_sf_df.to_excel(writer, sheet_name="Invalid Store Family", index=False)
             unmatched_df.to_excel(writer, sheet_name="Unmatched", index=False)
             product_template.to_excel(writer, sheet_name="Product Template", index=False)
 
         output.seek(0)
-
-        progress.progress(100)
-        status.text("Done!")
 
         st.download_button(
             "📥 Download File",
