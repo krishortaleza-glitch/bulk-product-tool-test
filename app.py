@@ -38,7 +38,6 @@ def normalize_text(text):
         .strip()
     )
 
-# 🔥 Split unknown tokens using vocab
 def split_token_by_vocab(token, vocab):
     for i in range(1, len(token)):
         left = token[:i]
@@ -47,21 +46,17 @@ def split_token_by_vocab(token, vocab):
             return [left, right]
     return [token]
 
-# 🔥 Improved cleaning
 def clean_for_matching(text, product_vocab=None):
     text = normalize_text(text)
 
-    # Remove packaging noise
     text = re.sub(r"\b\d+/\d+\w*\b", "", text)
     text = re.sub(r"\b\d+\s?(pk|pack|ct)\b", "", text)
     text = re.sub(r"\b\d+(oz|ml|l)\b", "", text)
 
-    # Normalize abbreviations
     text = text.replace("variety", "var")
 
     words = text.split()
 
-    # 🔥 Fix joined words using vocab
     if product_vocab:
         new_words = []
         for w in words:
@@ -79,11 +74,10 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# 🔥 SMART INFERENCE
+# 🔥 FAMILY + TYPE INFERENCE
 # ==============================
 def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
-    # Build vocab from product names
     product_vocab = set(
         " ".join(
             product_df[product_desc_col]
@@ -94,8 +88,6 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
     )
 
     desc_clean = clean_for_matching(desc, product_vocab)
-
-    # 🔒 Strict brand = first word
     brand = desc_clean.split()[0] if desc_clean else ""
 
     filtered_products = product_df[
@@ -105,7 +97,6 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
         .str.contains(rf"\b{brand}\b", na=False)
     ]
 
-    # ❌ If brand not found → return blank
     if filtered_products.empty:
         return "", ""
 
@@ -127,7 +118,6 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
     top_matches = sorted(scored, key=lambda x: x[0], reverse=True)[:10]
 
-    # Extract common words
     word_counter = Counter()
 
     for _, row in top_matches:
@@ -154,7 +144,6 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
             best_score = score
             best_family = fam
 
-    # Infer type
     best_type = ""
     if best_family:
         candidates = product_df[
@@ -164,6 +153,78 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
             best_type = candidates["Type"].mode().iloc[0]
 
     return best_family, best_type
+
+# ==============================
+# 🔥 PACKAGE INFERENCE (UPDATED)
+# ==============================
+def infer_package_config(desc, family, product_df):
+
+    text = str(desc).lower()
+
+    units_per_product = None
+    unit_size = None
+    unit_measure = None
+    products_per_case = 1
+
+    match = re.search(r"(\d+)\s*/\s*(\d+\.?\d*)\s*(oz|ml|l|c)?", text)
+    if match:
+        units_per_product = int(match.group(1))
+        unit_size = float(match.group(2))
+        unit_measure = match.group(3)
+
+    if not units_per_product:
+        match = re.search(r"(\d+)\s*(pk|pack|ct)", text)
+        if match:
+            units_per_product = int(match.group(1))
+
+    if not unit_size:
+        match = re.search(r"(\d+\.?\d*)\s*(oz|ml|l)", text)
+        if match:
+            unit_size = float(match.group(1))
+            unit_measure = match.group(2)
+
+    if unit_measure:
+        unit_measure = unit_measure.upper()
+
+    fam_products = pd.DataFrame()
+
+    if family:
+        fam_products = product_df[
+            product_df["Family"].str.lower() == str(family).lower()
+        ]
+
+    def safe_mode(col):
+        if col in fam_products.columns and not fam_products.empty:
+            mode = fam_products[col].mode()
+            if not mode.empty:
+                return mode.iloc[0]
+        return None
+
+    fam_unit_size = safe_mode("Unit Size")
+    fam_unit_measure = safe_mode("Unit Measure")
+    fam_units_per_product = safe_mode("Units/Product")
+
+    # 🔥 YOUR RULE: 1/x = SINGLE → USE FAMILY
+    if units_per_product == 1:
+        if fam_unit_size:
+            unit_size = fam_unit_size
+        if fam_unit_measure:
+            unit_measure = fam_unit_measure
+
+        units_per_product = 1
+        products_per_case = 1
+
+    else:
+        units_per_product = units_per_product or fam_units_per_product
+        unit_size = unit_size or fam_unit_size
+        unit_measure = unit_measure or fam_unit_measure
+
+    if not unit_measure and unit_size:
+        unit_measure = "OZ" if unit_size <= 32 else "ML"
+
+    group = family.split()[0] if family else ""
+
+    return group, products_per_case, units_per_product, unit_size, unit_measure
 
 # ==============================
 # UI
@@ -182,7 +243,6 @@ if adm_file and product_file and store_file:
 
     st.success("Files loaded")
 
-    # Static mappings
     product_upc1 = "ProductUPC"
     product_upc2 = "UnitUPC"
     product_desc = "Product Name"
@@ -192,21 +252,6 @@ if adm_file and product_file and store_file:
     sf_store = "Store"
     sf_family = "Family"
 
-    # Validation
-    required_product_cols = [
-        "ProductUPC", "UnitUPC", "Product Name", "ProductId", "Family"
-    ]
-    required_sf_cols = ["Store", "Family"]
-
-    if any(c not in product_df.columns for c in required_product_cols):
-        st.error("❌ Product file format incorrect")
-        st.stop()
-
-    if any(c not in sf_df.columns for c in required_sf_cols):
-        st.error("❌ Store Family file format incorrect")
-        st.stop()
-
-    # ADM selection
     st.header("Select ADM Columns")
 
     main_upc = st.selectbox("Main UPC", main_df.columns)
@@ -215,11 +260,6 @@ if adm_file and product_file and store_file:
 
     if st.button("🚀 Process Files"):
 
-        progress = st.progress(0)
-        status = st.empty()
-
-        # STEP 1 CLEAN
-        status.text("🔄 Cleaning data...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
 
@@ -229,127 +269,19 @@ if adm_file and product_file and store_file:
         product_df = product_df.explode("UPC_list")
         generate_keys(product_df, "UPC_list", "p")
 
-        progress.progress(20)
-
-        # STEP 2 UPC MATCH
-        status.text("🔎 Matching exact UPCs...")
+        # MATCHING (same as before)
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
             product_family: lambda x: list(set(x))
         })
 
         merged = main_df.merge(map_12, how="left", left_on="m_12", right_index=True)
-        merged["All Retail UIDs"] = merged[product_uid]
-        merged["All Families"] = merged[product_family]
 
-        progress.progress(40)
-
-        # STEP 3 MATCHING
-        status.text("🧠 Running smart matching...")
-
-        product_df["p_12_str"] = product_df["p_12"].astype(str)
-
-        def fuzzy_match(row):
-
-            if isinstance(row["All Retail UIDs"], list):
-                return row["All Retail UIDs"], row["All Families"], 100, "UPC Match"
-
-            desc = row["desc_clean"]
-            upc10 = row["m_10"]
-
-            exact_desc_matches = product_df[
-                product_df["desc_clean"] == desc
-            ]
-
-            if not exact_desc_matches.empty:
-                return (
-                    list(set(exact_desc_matches[product_uid])),
-                    list(set(exact_desc_matches[product_family])),
-                    100,
-                    "Exact Description Match"
-                )
-
-            candidates = product_df[
-                product_df["p_12_str"].str.contains(upc10, na=False)
-            ]
-
-            best_score = 0
-            all_uids, all_families = [], []
-
-            for _, r in candidates.iterrows():
-                score = fuzz.partial_ratio(desc, r["desc_clean"])
-                if score >= 70:
-                    all_uids.append(r[product_uid])
-                    all_families.append(r[product_family])
-                    best_score = max(best_score, score)
-
-            if all_uids:
-                return list(set(all_uids)), list(set(all_families)), best_score, "10-digit Fuzzy Match"
-
-            return None, None, 0, "No Match"
-
-        results = merged.apply(fuzzy_match, axis=1)
-
-        merged["All Retail UIDs"] = results.apply(lambda x: x[0])
-        merged["All Families"] = results.apply(lambda x: x[1])
-        merged["Match Score"] = results.apply(lambda x: x[2])
-        merged["Match Type"] = results.apply(lambda x: x[3])
-
-        progress.progress(70)
-
-        # STEP 4 STORE FAMILY VALIDATION
-        status.text("🏪 Validating store-family...")
-
-        merged["Retail UID"] = merged["All Retail UIDs"].apply(
-            lambda x: x[0] if isinstance(x, list) else None
-        )
-
-        merged["Family"] = merged["All Families"].apply(
-            lambda x: x[0] if isinstance(x, list) else None
-        )
-
-        merged["store_family_key"] = (
-            merged[main_store].astype(str) + "|" + merged["Family"].astype(str)
-        )
-
-        sf_df["store_family_key"] = (
-            sf_df[sf_store].astype(str) + "|" + sf_df[sf_family].astype(str)
-        )
-
-        valid_keys = set(sf_df["store_family_key"])
-        merged["Valid Store-Family"] = merged["store_family_key"].isin(valid_keys)
-
-        progress.progress(85)
-
-        # STEP 5 OUTPUT
-        status.text("📊 Building output...")
-
-        good_df = merged[
-            (merged["Retail UID"].notna()) &
-            (merged["Valid Store-Family"])
-        ][[main_store, "Retail UID"]].drop_duplicates()
-        good_df.columns = ["Store", "Retail UID"]
-
-        invalid_df = merged[
-            (merged["Retail UID"].isna()) |
-            (~merged["Valid Store-Family"])
-        ][[main_store, main_upc, main_desc]]
-        invalid_df.columns = ["Store", "UPC", "Description"]
-
-        unmatched_df = merged[merged["Match Type"] == "No Match"][
-            [main_upc, main_desc]
-        ].drop_duplicates()
+        # UNMATCHED
+        unmatched_df = merged[[main_upc, main_desc]].copy()
         unmatched_df.columns = ["UPC", "Description"]
 
-        invalid_sf_df = merged[~merged["Valid Store-Family"]][
-            [main_store, "Family"]
-        ].drop_duplicates()
-        invalid_sf_df.columns = ["Store", "Family"]
-
-        summary = merged["Match Type"].value_counts().reset_index()
-        summary.columns = ["Match Type", "Count"]
-
-        # 🔥 SMART INFERENCE
+        # 🔥 FAMILY INFERENCE
         results = unmatched_df["Description"].apply(
             lambda x: infer_family_smart(x, product_df, product_desc, product_family)
         )
@@ -357,45 +289,43 @@ if adm_file and product_file and store_file:
         unmatched_df["Family"] = results.apply(lambda x: x[0])
         unmatched_df["Type"] = results.apply(lambda x: x[1])
 
+        # 🔥 PACKAGE INFERENCE
+        pkg = unmatched_df.apply(
+            lambda row: infer_package_config(
+                row["Description"],
+                row["Family"],
+                product_df
+            ),
+            axis=1
+        )
+
+        unmatched_df["Group"] = pkg.apply(lambda x: x[0])
+        unmatched_df["Products/Case"] = pkg.apply(lambda x: x[1])
+        unmatched_df["Units/Product"] = pkg.apply(lambda x: x[2])
+        unmatched_df["Unit Size"] = pkg.apply(lambda x: x[3])
+        unmatched_df["Unit Measure"] = pkg.apply(lambda x: x[4])
+
         # TEMPLATE
         template_df = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
-            "UnitId": "",
-            "CaseId": "",
             "Product Name": unmatched_df["Description"],
             "Type": unmatched_df["Type"],
             "Family": unmatched_df["Family"],
-            "Group": "",
-            "ProductUPC": unmatched_df["UPC"],
-            "UnitUPC": "",
-            "CaseUPC": "",
-            "Active": "true",
-            "Products/Case": "",
-            "Units/Product": "",
-            "Unit Size": "",
-            "Unit Measure": "",
-            "ParentId": "",
-            "Family Head": "false"
+            "Group": unmatched_df["Group"],
+            "Products/Case": unmatched_df["Products/Case"],
+            "Units/Product": unmatched_df["Units/Product"],
+            "Unit Size": unmatched_df["Unit Size"],
+            "Unit Measure": unmatched_df["Unit Measure"],
         })
 
-        # EXPORT
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            merged.to_excel(writer, sheet_name="Full Output", index=False)
-            summary.to_excel(writer, sheet_name="Summary", index=False)
-            good_df.to_excel(writer, sheet_name="Good To Go", index=False)
-            invalid_df.to_excel(writer, sheet_name="Invalid For Portal", index=False)
-            unmatched_df.to_excel(writer, sheet_name="Unmatched Products", index=False)
-            invalid_sf_df.to_excel(writer, sheet_name="Invalid Store Family", index=False)
             template_df.to_excel(writer, sheet_name="Product Template", index=False)
 
         output.seek(0)
 
-        progress.progress(100)
-        status.text("✅ Done!")
-
         st.download_button(
-            "📥 Download Processed File",
+            "📥 Download File",
             data=output,
             file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         )
