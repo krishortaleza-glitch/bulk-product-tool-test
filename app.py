@@ -38,7 +38,17 @@ def normalize_text(text):
         .strip()
     )
 
-def clean_for_matching(text):
+# 🔥 Split unknown tokens using vocab
+def split_token_by_vocab(token, vocab):
+    for i in range(1, len(token)):
+        left = token[:i]
+        right = token[i:]
+        if left in vocab and right in vocab:
+            return [left, right]
+    return [token]
+
+# 🔥 Improved cleaning
+def clean_for_matching(text, product_vocab=None):
     text = normalize_text(text)
 
     # Remove packaging noise
@@ -46,13 +56,22 @@ def clean_for_matching(text):
     text = re.sub(r"\b\d+\s?(pk|pack|ct)\b", "", text)
     text = re.sub(r"\b\d+(oz|ml|l)\b", "", text)
 
-    return text.strip()
+    # Normalize abbreviations
+    text = text.replace("variety", "var")
 
-def extract_brand(desc):
-    words = desc.split()
-    if len(words) >= 2:
-        return " ".join(words[:2])
-    return words[0] if words else ""
+    words = text.split()
+
+    # 🔥 Fix joined words using vocab
+    if product_vocab:
+        new_words = []
+        for w in words:
+            if w not in product_vocab:
+                new_words.extend(split_token_by_vocab(w, product_vocab))
+            else:
+                new_words.append(w)
+        words = new_words
+
+    return " ".join(words).strip()
 
 def generate_keys(df, col, prefix):
     s = clean_upc(df[col])
@@ -60,47 +79,40 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# 🔥 SMART FAMILY + TYPE INFERENCE
+# 🔥 SMART INFERENCE
 # ==============================
 def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
-    desc_clean = clean_for_matching(desc)
-
-    # 🔥 BRAND FILTER
-    brand = extract_brand(desc_clean)
-
-    filtered_products = product_df[
-        product_df[product_desc_col]
-        .astype(str)
-        .str.lower()
-        .str.contains(brand, na=False)
-    ]
-
-    if filtered_products.empty:
-        filtered_products = product_df
-
-    # 🔥 VOCAB FILTER
+    # Build vocab from product names
     product_vocab = set(
         " ".join(
-            filtered_products[product_desc_col]
+            product_df[product_desc_col]
             .astype(str)
             .str.lower()
             .tolist()
         ).split()
     )
 
-    desc_words = desc_clean.split()
+    desc_clean = clean_for_matching(desc, product_vocab)
 
-    filtered_words = [w for w in desc_words if w in product_vocab]
+    # 🔒 Strict brand = first word
+    brand = desc_clean.split()[0] if desc_clean else ""
 
-    if filtered_words:
-        desc_clean = " ".join(filtered_words)
+    filtered_products = product_df[
+        product_df[product_desc_col]
+        .astype(str)
+        .str.lower()
+        .str.contains(rf"\b{brand}\b", na=False)
+    ]
+
+    # ❌ If brand not found → return blank
+    if filtered_products.empty:
+        return "", ""
 
     scored = []
 
-    # Step 1: similarity scoring
     for _, row in filtered_products.iterrows():
-        prod_name = clean_for_matching(row[product_desc_col])
+        prod_name = clean_for_matching(row[product_desc_col], product_vocab)
 
         score = max(
             fuzz.token_set_ratio(desc_clean, prod_name),
@@ -113,30 +125,28 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
     if not scored:
         return "", ""
 
-    # Step 2: top matches
     top_matches = sorted(scored, key=lambda x: x[0], reverse=True)[:10]
 
-    # Step 3: common words extraction
+    # Extract common words
     word_counter = Counter()
 
     for _, row in top_matches:
-        words = clean_for_matching(row[product_desc_col]).split()
+        words = clean_for_matching(row[product_desc_col], product_vocab).split()
         word_counter.update(set(words))
 
     common_words = [
-        word for word, count in word_counter.items()
-        if count >= len(top_matches) * 0.6
+        w for w, c in word_counter.items()
+        if c >= len(top_matches) * 0.6
     ]
 
     base_phrase = " ".join(common_words)
 
-    # Step 4: map to best family
     best_family = ""
     best_score = 0
 
     for _, row in top_matches:
         fam = row[family_col]
-        fam_clean = clean_for_matching(fam)
+        fam_clean = clean_for_matching(fam, product_vocab)
 
         score = fuzz.token_set_ratio(base_phrase, fam_clean)
 
@@ -144,7 +154,7 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
             best_score = score
             best_family = fam
 
-    # Step 5: infer type
+    # Infer type
     best_type = ""
     if best_family:
         candidates = product_df[
@@ -247,7 +257,6 @@ if adm_file and product_file and store_file:
             desc = row["desc_clean"]
             upc10 = row["m_10"]
 
-            # Exact match
             exact_desc_matches = product_df[
                 product_df["desc_clean"] == desc
             ]
@@ -260,7 +269,6 @@ if adm_file and product_file and store_file:
                     "Exact Description Match"
                 )
 
-            # Fuzzy match
             candidates = product_df[
                 product_df["p_12_str"].str.contains(upc10, na=False)
             ]
