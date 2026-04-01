@@ -10,7 +10,7 @@ st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
 # ==============================
-# LOAD (CSV + EXCEL SUPPORT)
+# LOAD
 # ==============================
 @st.cache_data
 def load_file(file):
@@ -353,7 +353,7 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
-        # EXPORT (FIXED - INSIDE BUTTON)
+        # EXPORT (FIXED)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
             temp_path = tmp.name
 
