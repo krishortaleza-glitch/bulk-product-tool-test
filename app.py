@@ -2,12 +2,15 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from io import BytesIO
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 import re
 
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
+# ==============================
+# LOAD
+# ==============================
 @st.cache_data
 def load_file(file):
     return pd.read_excel(file)
@@ -31,7 +34,7 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# NEW: PACK PARSER
+# PACK PARSER
 # ==============================
 def parse_pack(desc):
     desc = str(desc).lower()
@@ -67,6 +70,8 @@ if adm_file and product_file and store_file:
     product_df = load_file(product_file)
     sf_df = load_file(store_file)
 
+    product_df.columns = product_df.columns.str.strip()
+
     st.success("Files loaded")
 
     # ==============================
@@ -92,8 +97,6 @@ if adm_file and product_file and store_file:
         sf_store = st.selectbox("Store Column", sf_df.columns)
         sf_family = st.selectbox("Family Column", sf_df.columns)
 
-    st.info("Select columns, then click Process")
-
     if st.button("🚀 Process Files"):
 
         progress = st.progress(0)
@@ -102,7 +105,7 @@ if adm_file and product_file and store_file:
         # ==============================
         # CLEAN
         # ==============================
-        status.text("🔄 Cleaning data...")
+        status.text("Cleaning...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
         generate_keys(main_df, main_upc, "m")
@@ -124,7 +127,7 @@ if adm_file and product_file and store_file:
         # ==============================
         # MATCH
         # ==============================
-        status.text("🔎 Matching...")
+        status.text("Matching...")
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
             product_family: lambda x: list(set(x))
@@ -189,35 +192,38 @@ if adm_file and product_file and store_file:
         unmatched_df.columns = ["UPC", "Description"]
 
         # ==============================
-        # SAFE INFERENCE
+        # SMART INFERENCE (SAFE)
         # ==============================
         def infer(desc):
             group, size, unit = parse_pack(desc)
 
-            if "Group" not in product_df.columns:
+            if group is None:
                 return pd.Series({
-                    "Group": group,
+                    "Group": None,
                     "Products/Case": None,
                     "Units/Product": None,
                     "Unit Size": size,
                     "Unit Measure": unit,
                 })
 
-            rows = product_df[product_df["Group"] == group]
+            candidates = product_df[product_df["Group"] == group]
 
-            def mode(col):
-                if col not in product_df.columns or rows.empty:
+            if size is not None:
+                candidates = candidates[candidates["Unit Size"] == size]
+
+            def safe_mode(df, col):
+                if df.empty:
                     return None
-                if rows[col].mode().empty:
+                if df[col].mode().empty:
                     return None
-                return rows[col].mode().iloc[0]
+                return df[col].mode().iloc[0]
 
             return pd.Series({
                 "Group": group,
-                "Products/Case": mode("Products/Case"),
-                "Units/Product": mode("Units/Product"),
-                "Unit Size": size or mode("Unit Size"),
-                "Unit Measure": unit or mode("Unit Measure"),
+                "Products/Case": safe_mode(candidates, "Products/Case"),
+                "Units/Product": safe_mode(candidates, "Units/Product"),
+                "Unit Size": size or safe_mode(candidates, "Unit Size"),
+                "Unit Measure": unit or safe_mode(candidates, "Unit Measure"),
             })
 
         if not unmatched_df.empty:
@@ -249,41 +255,27 @@ if adm_file and product_file and store_file:
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
 
-            # ALWAYS FIRST SHEET
             pd.DataFrame({"Status": ["OK"]}).to_excel(writer, "Status", index=False)
 
-            try:
-                merged.to_excel(writer, "Full Output", index=False)
-            except:
-                pass
-
-            try:
-                good_df.to_excel(writer, "Good To Go", index=False)
-            except:
-                pass
-
-            try:
-                invalid_df.to_excel(writer, "Invalid", index=False)
-            except:
-                pass
-
-            try:
-                unmatched_df.to_excel(writer, "Unmatched", index=False)
-            except:
-                pass
-
-            try:
-                template.to_excel(writer, "Product Template", index=False)
-            except:
-                pass
+            for name, df in {
+                "Full Output": merged,
+                "Good To Go": good_df,
+                "Invalid": invalid_df,
+                "Unmatched": unmatched_df,
+                "Product Template": template
+            }.items():
+                try:
+                    df.to_excel(writer, sheet_name=name, index=False)
+                except:
+                    pass
 
         output.seek(0)
 
         progress.progress(100)
-        status.text("✅ Done!")
+        status.text("Done!")
 
         st.download_button(
-            "📥 Download Processed File",
+            "📥 Download",
             data=output,
             file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         )
