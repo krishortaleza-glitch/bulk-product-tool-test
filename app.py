@@ -48,6 +48,12 @@ def clean_for_matching(text):
 
     return text.strip()
 
+def extract_brand(desc):
+    words = desc.split()
+    if len(words) >= 2:
+        return " ".join(words[:2])
+    return words[0] if words else ""
+
 def generate_keys(df, col, prefix):
     s = clean_upc(df[col])
     df[f"{prefix}_12"] = s.str.zfill(12)
@@ -60,10 +66,23 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
     desc_clean = clean_for_matching(desc)
 
-    # 🔥 NEW: VOCAB FILTER (fix edge cases like "washington")
+    # 🔥 BRAND FILTER
+    brand = extract_brand(desc_clean)
+
+    filtered_products = product_df[
+        product_df[product_desc_col]
+        .astype(str)
+        .str.lower()
+        .str.contains(brand, na=False)
+    ]
+
+    if filtered_products.empty:
+        filtered_products = product_df
+
+    # 🔥 VOCAB FILTER
     product_vocab = set(
         " ".join(
-            product_df[product_desc_col]
+            filtered_products[product_desc_col]
             .astype(str)
             .str.lower()
             .tolist()
@@ -72,17 +91,15 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
     desc_words = desc_clean.split()
 
-    filtered_words = [
-        w for w in desc_words if w in product_vocab
-    ]
+    filtered_words = [w for w in desc_words if w in product_vocab]
 
     if filtered_words:
         desc_clean = " ".join(filtered_words)
 
     scored = []
 
-    # Step 1: find similar products
-    for _, row in product_df.iterrows():
+    # Step 1: similarity scoring
+    for _, row in filtered_products.iterrows():
         prod_name = clean_for_matching(row[product_desc_col])
 
         score = max(
@@ -99,7 +116,7 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
     # Step 2: top matches
     top_matches = sorted(scored, key=lambda x: x[0], reverse=True)[:10]
 
-    # Step 3: extract common words
+    # Step 3: common words extraction
     word_counter = Counter()
 
     for _, row in top_matches:
@@ -243,7 +260,7 @@ if adm_file and product_file and store_file:
                     "Exact Description Match"
                 )
 
-            # Fuzzy
+            # Fuzzy match
             candidates = product_df[
                 product_df["p_12_str"].str.contains(upc10, na=False)
             ]
