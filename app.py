@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from io import BytesIO
+from rapidfuzz import fuzz
 
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
@@ -26,184 +27,245 @@ def clean_desc(series):
 def generate_keys(df, col, prefix):
     s = clean_upc(df[col])
     df[f"{prefix}_12"] = s.str.zfill(12)
+    df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
-def safe_mode(df, col):
-    if col not in df.columns or df.empty:
-        return ""
-    try:
-        return df[col].mode().iloc[0]
-    except:
-        return ""
-
-def extract_family(desc, product_df):
+# ==============================
+# NEW HELPERS (SAFE ADDITION)
+# ==============================
+def extract_family(desc, product_df, product_family_col):
     desc = str(desc).lower()
-    for fam in product_df["Family"].dropna().unique():
+    families = product_df[product_family_col].dropna().unique()
+
+    for fam in families:
         if str(fam).lower() in desc:
             return fam
     return ""
 
 def extract_type(family, product_df):
-    if not family:
+    if not family or "Type" not in product_df.columns:
         return ""
+
     candidates = product_df[product_df["Family"] == family]
-    return safe_mode(candidates, "Type")
+
+    if candidates.empty:
+        return ""
+
+    try:
+        return candidates["Type"].mode().iloc[0]
+    except:
+        return ""
 
 # ==============================
 # UI
 # ==============================
+st.header("Upload Files")
+
 adm_file = st.file_uploader("ADM File", type=["xlsx"])
 product_file = st.file_uploader("Product File", type=["xlsx"])
-store_file = st.file_uploader("Store File", type=["xlsx"])
+store_file = st.file_uploader("Store Assignment File", type=["xlsx"])
 
 if adm_file and product_file and store_file:
-
-    st.success("✅ Files uploaded")
 
     main_df = load_file(adm_file)
     product_df = load_file(product_file)
     sf_df = load_file(store_file)
 
-    product_df.columns = product_df.columns.str.strip()
+    st.success("Files loaded")
 
-    # COLUMN SELECTION
-    main_upc = st.selectbox("Main UPC", main_df.columns)
-    main_desc = st.selectbox("Main Description", main_df.columns)
-    main_store = st.selectbox("Main Store", main_df.columns)
+    st.header("Select Columns")
 
-    product_upc1 = st.selectbox("Product UPC 1", product_df.columns)
-    product_upc2 = st.selectbox("Product UPC 2", product_df.columns)
-    product_desc = st.selectbox("Product Description", product_df.columns)
-    product_uid = st.selectbox("Product UID", product_df.columns)
-    product_family = st.selectbox("Product Family", product_df.columns)
+    col1, col2, col3 = st.columns(3)
 
-    sf_store = st.selectbox("Store Column", sf_df.columns)
-    sf_family = st.selectbox("Family Column", sf_df.columns)
+    with col1:
+        main_upc = st.selectbox("Main UPC", main_df.columns)
+        main_desc = st.selectbox("Main Description", main_df.columns)
+        main_store = st.selectbox("Main Store", main_df.columns)
+
+    with col2:
+        product_upc1 = st.selectbox("Product UPC 1", product_df.columns)
+        product_upc2 = st.selectbox("Product UPC 2", product_df.columns)
+        product_desc = st.selectbox("Product Description", product_df.columns)
+        product_uid = st.selectbox("Product UID", product_df.columns)
+        product_family = st.selectbox("Product Family", product_df.columns)
+
+    with col3:
+        sf_store = st.selectbox("Store Column", sf_df.columns)
+        sf_family = st.selectbox("Family Column", sf_df.columns)
+
+    st.info("Select columns, then click Process")
 
     if st.button("🚀 Process Files"):
 
-        try:
-            st.write("Processing...")
+        progress = st.progress(0)
+        status = st.empty()
 
-            # CLEAN
-            main_df["desc_clean"] = clean_desc(main_df[main_desc])
-            product_df["desc_clean"] = clean_desc(product_df[product_desc])
+        # STEP 1
+        status.text("🔄 Cleaning data...")
+        main_df["desc_clean"] = clean_desc(main_df[main_desc])
+        product_df["desc_clean"] = clean_desc(product_df[product_desc])
+        generate_keys(main_df, main_upc, "m")
 
-            generate_keys(main_df, main_upc, "m")
+        product_df["UPC_list"] = product_df[[product_upc1, product_upc2]].values.tolist()
+        product_df = product_df.explode("UPC_list")
+        generate_keys(product_df, "UPC_list", "p")
 
-            product_df["UPC_list"] = product_df[[product_upc1, product_upc2]].values.tolist()
-            product_df = product_df.explode("UPC_list")
-            generate_keys(product_df, "UPC_list", "p")
+        progress.progress(20)
 
-            # ==============================
-            # EXACT MATCH
-            # ==============================
-            map_12 = product_df.groupby("p_12").agg({
-                product_uid: lambda x: list(set(x)),
-                product_family: lambda x: list(set(x))
-            })
+        # STEP 2
+        status.text("🔎 Matching exact UPCs...")
+        map_12 = product_df.groupby("p_12").agg({
+            product_uid: lambda x: list(set(x)),
+            product_family: lambda x: list(set(x))
+        })
 
-            merged = main_df.merge(map_12, how="left", left_on="m_12", right_index=True)
+        merged = main_df.merge(map_12, how="left", left_on="m_12", right_index=True)
+        merged["All Retail UIDs"] = merged[product_uid]
+        merged["All Families"] = merged[product_family]
 
-            merged["Retail UID"] = merged[product_uid].apply(
-                lambda x: x[0] if isinstance(x, list) else None
-            )
+        progress.progress(40)
 
-            merged["Family"] = merged[product_family].apply(
-                lambda x: x[0] if isinstance(x, list) else None
-            )
+        # STEP 3 (UNCHANGED)
+        status.text("🧠 Running smart matching...")
+        product_df["p_12_str"] = product_df["p_12"].astype(str)
 
-            merged["Match Type"] = merged["Retail UID"].apply(
-                lambda x: "UPC Match" if pd.notna(x) else "No Match"
-            )
+        def fuzzy_match(row):
+            if isinstance(row["All Retail UIDs"], list):
+                return row["All Retail UIDs"], row["All Families"], 100, "UPC Match"
 
-            # ==============================
-            # STORE VALIDATION
-            # ==============================
-            merged["store_family_key"] = merged[main_store].astype(str) + "|" + merged["Family"].astype(str)
-            sf_df["store_family_key"] = sf_df[sf_store].astype(str) + "|" + sf_df[sf_family].astype(str)
+            upc10 = row["m_10"]
+            desc = row["desc_clean"]
 
-            merged["Valid Store-Family"] = merged["store_family_key"].isin(set(sf_df["store_family_key"]))
-
-            # ==============================
-            # OUTPUT TABS
-            # ==============================
-            good_df = merged[
-                (merged["Retail UID"].notna()) &
-                (merged["Valid Store-Family"])
+            candidates = product_df[
+                product_df["p_12_str"].str.contains(upc10, na=False)
             ]
 
-            invalid_df = merged[
-                (merged["Retail UID"].isna()) |
-                (~merged["Valid Store-Family"])
-            ]
+            best_score = 0
+            all_uids, all_families = [], []
 
-            invalid_sf_df = merged[
-                ~merged["Valid Store-Family"]
-            ]
+            for _, r in candidates.iterrows():
+                score = fuzz.partial_ratio(desc, r["desc_clean"])
+                if score >= 70:
+                    all_uids.append(r[product_uid])
+                    all_families.append(r[product_family])
+                    best_score = max(best_score, score)
 
-            unmatched_df = merged[merged["Match Type"] == "No Match"][
-                [main_upc, main_desc]
-            ].drop_duplicates()
+            if not all_uids:
+                return None, None, 0, "No Match"
 
-            unmatched_df.columns = ["UPC", "Description"]
+            return list(set(all_uids)), list(set(all_families)), best_score, "10-digit Fuzzy Match"
 
-            # ==============================
-            # TYPE + FAMILY INFERENCE ONLY
-            # ==============================
-            unmatched_df["Family"] = unmatched_df["Description"].apply(
-                lambda x: extract_family(x, product_df)
-            )
+        results = merged.apply(fuzzy_match, axis=1)
 
-            unmatched_df["Type"] = unmatched_df["Family"].apply(
-                lambda x: extract_type(x, product_df)
-            )
+        merged["All Retail UIDs"] = results.apply(lambda x: x[0])
+        merged["All Families"] = results.apply(lambda x: x[1])
+        merged["Match Score"] = results.apply(lambda x: x[2])
+        merged["Match Type"] = results.apply(lambda x: x[3])
 
-            # ==============================
-            # PRODUCT TEMPLATE
-            # ==============================
-            template_df = pd.DataFrame({
-                "ProductId": unmatched_df["UPC"],
-                "UnitId": "",
-                "CaseId": "",
-                "Product Name": unmatched_df["Description"],
-                "Type": unmatched_df["Type"],
-                "Family": unmatched_df["Family"],
-                "Group": "",
-                "ProductUPC": unmatched_df["UPC"],
-                "UnitUPC": "",
-                "CaseUPC": "",
-                "Active": "true",
-                "Products/Case": "",
-                "Units/Product": "",
-                "Unit Size": "",
-                "Unit Measure": "",
-                "ParentId": "",
-                "Family Head": "false"
-            })
+        progress.progress(70)
 
-            # ==============================
-            # EXPORT (ALL TABS RESTORED)
-            # ==============================
-            output = BytesIO()
-            writer = pd.ExcelWriter(output, engine="openpyxl")
+        # STEP 4
+        status.text("🏪 Validating store-family...")
+        merged["Retail UID"] = merged["All Retail UIDs"].apply(
+            lambda x: x[0] if isinstance(x, list) else None
+        )
 
+        merged["Family"] = merged["All Families"].apply(
+            lambda x: x[0] if isinstance(x, list) else None
+        )
+
+        merged["store_family_key"] = (
+            merged[main_store].astype(str) + "|" + merged["Family"].astype(str)
+        )
+
+        sf_df["store_family_key"] = (
+            sf_df[sf_store].astype(str) + "|" + sf_df[sf_family].astype(str)
+        )
+
+        valid_keys = set(sf_df["store_family_key"])
+        merged["Valid Store-Family"] = merged["store_family_key"].isin(valid_keys)
+
+        progress.progress(85)
+
+        # STEP 5 OUTPUT (UNCHANGED)
+        status.text("📊 Building output...")
+
+        good_df = merged[
+            (merged["Retail UID"].notna()) &
+            (merged["Valid Store-Family"])
+        ][[main_store, "Retail UID"]].drop_duplicates()
+        good_df.columns = ["Store", "Retail UID"]
+
+        invalid_df = merged[
+            (merged["Retail UID"].isna()) |
+            (~merged["Valid Store-Family"])
+        ][[main_store, main_upc, main_desc]]
+        invalid_df.columns = ["Store", "UPC", "Description"]
+
+        unmatched_df = merged[merged["Match Type"] == "No Match"][
+            [main_upc, main_desc]
+        ].drop_duplicates()
+        unmatched_df.columns = ["UPC", "Description"]
+
+        invalid_sf_df = merged[~merged["Valid Store-Family"]][
+            [main_store, "Family"]
+        ].drop_duplicates()
+        invalid_sf_df.columns = ["Store", "Family"]
+
+        summary = merged["Match Type"].value_counts().reset_index()
+        summary.columns = ["Match Type", "Count"]
+
+        # ==============================
+        # NEW: TYPE + FAMILY INFERENCE
+        # ==============================
+        unmatched_df["Family"] = unmatched_df["Description"].apply(
+            lambda x: extract_family(x, product_df, product_family)
+        )
+
+        unmatched_df["Type"] = unmatched_df["Family"].apply(
+            lambda x: extract_type(x, product_df)
+        )
+
+        # ==============================
+        # NEW: PRODUCT TEMPLATE
+        # ==============================
+        template_df = pd.DataFrame({
+            "ProductId": unmatched_df["UPC"],
+            "UnitId": "",
+            "CaseId": "",
+            "Product Name": unmatched_df["Description"],
+            "Type": unmatched_df["Type"],
+            "Family": unmatched_df["Family"],
+            "Group": "",
+            "ProductUPC": unmatched_df["UPC"],
+            "UnitUPC": "",
+            "CaseUPC": "",
+            "Active": "true",
+            "Products/Case": "",
+            "Units/Product": "",
+            "Unit Size": "",
+            "Unit Measure": "",
+            "ParentId": "",
+            "Family Head": "false"
+        })
+
+        # EXPORT
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
             merged.to_excel(writer, sheet_name="Full Output", index=False)
-            good_df.to_excel(writer, sheet_name="Good to Go", index=False)
-            invalid_df.to_excel(writer, sheet_name="Invalid for Portal", index=False)
+            summary.to_excel(writer, sheet_name="Summary", index=False)
+            good_df.to_excel(writer, sheet_name="Good To Go", index=False)
+            invalid_df.to_excel(writer, sheet_name="Invalid For Portal", index=False)
+            unmatched_df.to_excel(writer, sheet_name="Unmatched Products", index=False)
             invalid_sf_df.to_excel(writer, sheet_name="Invalid Store Family", index=False)
-            unmatched_df.to_excel(writer, sheet_name="Unmatched", index=False)
             template_df.to_excel(writer, sheet_name="Product Template", index=False)
 
-            writer.close()
-            output.seek(0)
+        output.seek(0)
 
-            st.success("✅ Done")
+        progress.progress(100)
+        status.text("✅ Done!")
 
-            st.download_button(
-                "📥 Download",
-                data=output,
-                file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-            )
-
-        except Exception as e:
-            st.error(f"❌ Error: {e}")
+        st.download_button(
+            "📥 Download Processed File",
+            data=output,
+            file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        )
