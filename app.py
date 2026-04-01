@@ -70,7 +70,14 @@ if adm_file and product_file and store_file:
     product_df = load_file(product_file)
     sf_df = load_file(store_file)
 
+    # 🔥 CRITICAL FIX: normalize columns
     product_df.columns = product_df.columns.str.strip()
+
+    # 🔥 ENSURE REQUIRED COLUMNS EXIST
+    required_cols = ["Group", "Products/Case", "Units/Product", "Unit Size", "Unit Measure"]
+    for col in required_cols:
+        if col not in product_df.columns:
+            product_df[col] = None
 
     st.success("Files loaded")
 
@@ -110,7 +117,7 @@ if adm_file and product_file and store_file:
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
         generate_keys(main_df, main_upc, "m")
 
-        # safer explode
+        # SAFE UPC explode
         df1 = product_df.copy()
         df1["UPC_list"] = df1[product_upc1]
 
@@ -128,6 +135,7 @@ if adm_file and product_file and store_file:
         # MATCH
         # ==============================
         status.text("Matching...")
+
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
             product_family: lambda x: list(set(x))
@@ -140,7 +148,9 @@ if adm_file and product_file and store_file:
                 return row[product_uid], row[product_family], "UPC Match"
 
             upc10 = row["m_10"]
-            candidates = product_df[product_df["p_12"].astype(str).str.contains(upc10, na=False)]
+            candidates = product_df[
+                product_df["p_12"].astype(str).str.contains(upc10, na=False)
+            ]
 
             if candidates.empty:
                 return None, None, "No Match"
@@ -192,45 +202,52 @@ if adm_file and product_file and store_file:
         unmatched_df.columns = ["UPC", "Description"]
 
         # ==============================
-        # SMART INFERENCE (SAFE)
+        # SAFE SMART INFERENCE
         # ==============================
         def infer(desc):
             group, size, unit = parse_pack(desc)
 
-            if group is None:
+            try:
+                candidates = product_df
+
+                if group:
+                    candidates = candidates[candidates["Group"] == group]
+
+                if size:
+                    candidates = candidates[candidates["Unit Size"] == size]
+
+                def safe_mode(df, col):
+                    if df.empty or col not in df.columns:
+                        return None
+                    if df[col].mode().empty:
+                        return None
+                    return df[col].mode().iloc[0]
+
                 return pd.Series({
-                    "Group": None,
+                    "Group": group,
+                    "Products/Case": safe_mode(candidates, "Products/Case"),
+                    "Units/Product": safe_mode(candidates, "Units/Product"),
+                    "Unit Size": size or safe_mode(candidates, "Unit Size"),
+                    "Unit Measure": unit or safe_mode(candidates, "Unit Measure"),
+                })
+
+            except:
+                return pd.Series({
+                    "Group": group,
                     "Products/Case": None,
                     "Units/Product": None,
                     "Unit Size": size,
                     "Unit Measure": unit,
                 })
 
-            candidates = product_df[product_df["Group"] == group]
-
-            if size is not None:
-                candidates = candidates[candidates["Unit Size"] == size]
-
-            def safe_mode(df, col):
-                if df.empty:
-                    return None
-                if df[col].mode().empty:
-                    return None
-                return df[col].mode().iloc[0]
-
-            return pd.Series({
-                "Group": group,
-                "Products/Case": safe_mode(candidates, "Products/Case"),
-                "Units/Product": safe_mode(candidates, "Units/Product"),
-                "Unit Size": size or safe_mode(candidates, "Unit Size"),
-                "Unit Measure": unit or safe_mode(candidates, "Unit Measure"),
-            })
-
         if not unmatched_df.empty:
-            unmatched_df = pd.concat([unmatched_df, unmatched_df["Description"].apply(infer)], axis=1)
+            unmatched_df = pd.concat(
+                [unmatched_df, unmatched_df["Description"].apply(infer)],
+                axis=1
+            )
 
         # ==============================
-        # TEMPLATE
+        # PRODUCT TEMPLATE
         # ==============================
         template = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
@@ -250,24 +267,26 @@ if adm_file and product_file and store_file:
         progress.progress(90)
 
         # ==============================
-        # EXPORT (CRASH-PROOF)
+        # EXPORT (CRASH PROOF)
         # ==============================
         output = BytesIO()
+
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
 
-            pd.DataFrame({"Status": ["OK"]}).to_excel(writer, "Status", index=False)
+            # ALWAYS WRITE FIRST
+            pd.DataFrame({"Status": ["Success"]}).to_excel(writer, "Status", index=False)
 
-            for name, df in {
-                "Full Output": merged,
-                "Good To Go": good_df,
-                "Invalid": invalid_df,
-                "Unmatched": unmatched_df,
-                "Product Template": template
-            }.items():
+            for name, df in [
+                ("Full Output", merged),
+                ("Good To Go", good_df),
+                ("Invalid", invalid_df),
+                ("Unmatched", unmatched_df),
+                ("Product Template", template),
+            ]:
                 try:
                     df.to_excel(writer, sheet_name=name, index=False)
-                except:
-                    pass
+                except Exception as e:
+                    st.warning(f"{name} failed: {e}")
 
         output.seek(0)
 
