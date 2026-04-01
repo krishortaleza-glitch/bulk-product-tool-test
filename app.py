@@ -140,7 +140,9 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
     best_type = ""
     if best_family and "Type" in product_df.columns:
-        candidates = product_df[product_df[family_col].str.lower() == best_family.lower()]
+        candidates = product_df[
+            product_df[family_col].str.lower() == best_family.lower()
+        ]
         if not candidates.empty:
             best_type = candidates["Type"].mode().iloc[0]
 
@@ -194,7 +196,7 @@ if adm_file and product_file and store_file:
         progress = st.progress(0)
         status = st.empty()
 
-        # STEP 1
+        # CLEAN
         status.text("🔄 Cleaning data...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
@@ -207,7 +209,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(20)
 
-        # STEP 2
+        # UPC MATCH
         status.text("🔎 Matching exact UPCs...")
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
@@ -220,7 +222,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(40)
 
-        # STEP 3
+        # MATCHING
         status.text("🧠 Running smart matching...")
         product_df["p_12_str"] = product_df["p_12"].astype(str)
 
@@ -270,7 +272,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(70)
 
-        # STEP 4
+        # STORE FAMILY VALIDATION
         status.text("🏪 Validating store-family...")
 
         merged["Retail UID"] = merged["All Retail UIDs"].apply(
@@ -294,7 +296,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(85)
 
-        # STEP 5 OUTPUT
+        # OUTPUT
         status.text("📊 Building output...")
 
         good_df = merged[
@@ -330,7 +332,7 @@ if adm_file and product_file and store_file:
         unmatched_df["Family"] = results.apply(lambda x: x[0])
         unmatched_df["Type"] = results.apply(lambda x: x[1])
 
-        # TEMPLATE (NO INFERENCE)
+        # TEMPLATE
         template_df = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
             "UnitId": "",
@@ -351,7 +353,7 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
-        # EXPORT (ALL TABS RESTORED)
+        # EXPORT
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             merged.to_excel(writer, sheet_name="Full Output", index=False)
@@ -369,6 +371,6 @@ if adm_file and product_file and store_file:
 
         st.download_button(
             "📥 Download Processed File",
-            data=output,
+            data=output.getvalue(),
             file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         )
