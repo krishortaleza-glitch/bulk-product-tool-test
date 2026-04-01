@@ -56,11 +56,15 @@ store_file = st.file_uploader("Store File", type=["xlsx"])
 
 if adm_file and product_file and store_file:
 
+    st.success("✅ Files uploaded")
+
     main_df = load_file(adm_file)
     product_df = load_file(product_file)
     sf_df = load_file(store_file)
 
     product_df.columns = product_df.columns.str.strip()
+
+    st.subheader("Column Mapping")
 
     main_upc = st.selectbox("Main UPC", main_df.columns)
     main_desc = st.selectbox("Main Description", main_df.columns)
@@ -75,11 +79,14 @@ if adm_file and product_file and store_file:
     sf_store = st.selectbox("Store Column", sf_df.columns)
     sf_family = st.selectbox("Family Column", sf_df.columns)
 
+    # 🚀 BUTTON
     if st.button("🚀 Process Files"):
+
+        st.info("⚙️ Processing started...")
 
         try:
             # ==============================
-            # PROCESS
+            # CLEAN
             # ==============================
             main_df["desc_clean"] = clean_desc(main_df[main_desc])
             product_df["desc_clean"] = clean_desc(product_df[product_desc])
@@ -90,6 +97,11 @@ if adm_file and product_file and store_file:
             product_df = product_df.explode("UPC_list")
             generate_keys(product_df, "UPC_list", "p")
 
+            st.write("✅ Cleaning done")
+
+            # ==============================
+            # MATCH
+            # ==============================
             map_12 = product_df.groupby("p_12").agg({
                 product_uid: lambda x: list(set(x)),
                 product_family: lambda x: list(set(x))
@@ -101,13 +113,11 @@ if adm_file and product_file and store_file:
                 lambda x: x[0] if isinstance(x, list) else None
             )
 
-            merged["Family"] = merged[product_family].apply(
-                lambda x: x[0] if isinstance(x, list) else None
-            )
-
             merged["Match Type"] = merged["Retail UID"].apply(
                 lambda x: "UPC Match" if pd.notna(x) else "No Match"
             )
+
+            st.write("✅ Matching done")
 
             # ==============================
             # UNMATCHED
@@ -118,6 +128,11 @@ if adm_file and product_file and store_file:
 
             unmatched_df.columns = ["UPC", "Description"]
 
+            st.write(f"🔍 Unmatched count: {len(unmatched_df)}")
+
+            # ==============================
+            # PARSE
+            # ==============================
             pack = unmatched_df["Description"].apply(parse_pack)
             unmatched_df["Group"] = pack.apply(lambda x: x[0])
             unmatched_df["Unit Size"] = pack.apply(lambda x: x[1])
@@ -137,6 +152,8 @@ if adm_file and product_file and store_file:
                 "Family Head": "false"
             })
 
+            st.write("✅ Template built")
+
             # ==============================
             # EXPORT
             # ==============================
@@ -145,23 +162,20 @@ if adm_file and product_file and store_file:
 
             pd.DataFrame({"Status": ["OK"]}).to_excel(writer, sheet_name="Status", index=False)
 
-            if not merged.empty:
-                merged.to_excel(writer, sheet_name="Full Output", index=False)
-
-            if not unmatched_df.empty:
-                unmatched_df.to_excel(writer, sheet_name="Unmatched", index=False)
-
-            if not template_df.empty:
-                template_df.to_excel(writer, sheet_name="Product Template", index=False)
+            merged.to_excel(writer, sheet_name="Full Output", index=False)
+            unmatched_df.to_excel(writer, sheet_name="Unmatched", index=False)
+            template_df.to_excel(writer, sheet_name="Product Template", index=False)
 
             writer.close()
             output.seek(0)
 
+            st.success("✅ Processing complete")
+
             st.download_button(
-                "📥 Download",
+                "📥 Download File",
                 data=output,
                 file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
             )
 
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"❌ Error occurred: {e}")
