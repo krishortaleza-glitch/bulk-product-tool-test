@@ -38,6 +38,7 @@ def normalize_text(text):
         .strip()
     )
 
+# 🔥 Split unknown tokens using vocab
 def split_token_by_vocab(token, vocab):
     for i in range(1, len(token)):
         left = token[:i]
@@ -46,17 +47,21 @@ def split_token_by_vocab(token, vocab):
             return [left, right]
     return [token]
 
+# 🔥 Improved cleaning
 def clean_for_matching(text, product_vocab=None):
     text = normalize_text(text)
 
+    # Remove packaging noise
     text = re.sub(r"\b\d+/\d+\w*\b", "", text)
     text = re.sub(r"\b\d+\s?(pk|pack|ct)\b", "", text)
     text = re.sub(r"\b\d+(oz|ml|l)\b", "", text)
 
+    # Normalize abbreviations
     text = text.replace("variety", "var")
 
     words = text.split()
 
+    # 🔥 Fix joined words using vocab
     if product_vocab:
         new_words = []
         for w in words:
@@ -74,10 +79,11 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# FAMILY INFERENCE
+# 🔥 SMART INFERENCE
 # ==============================
 def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
+    # Build vocab from product names
     product_vocab = set(
         " ".join(
             product_df[product_desc_col]
@@ -88,6 +94,8 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
     )
 
     desc_clean = clean_for_matching(desc, product_vocab)
+
+    # 🔒 Strict brand = first word
     brand = desc_clean.split()[0] if desc_clean else ""
 
     filtered_products = product_df[
@@ -97,6 +105,7 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
         .str.contains(rf"\b{brand}\b", na=False)
     ]
 
+    # ❌ If brand not found → return blank
     if filtered_products.empty:
         return "", ""
 
@@ -118,7 +127,9 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
     top_matches = sorted(scored, key=lambda x: x[0], reverse=True)[:10]
 
+    # Extract common words
     word_counter = Counter()
+
     for _, row in top_matches:
         words = clean_for_matching(row[product_desc_col], product_vocab).split()
         word_counter.update(set(words))
@@ -143,6 +154,7 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
             best_score = score
             best_family = fam
 
+    # Infer type
     best_type = ""
     if best_family:
         candidates = product_df[
@@ -170,6 +182,7 @@ if adm_file and product_file and store_file:
 
     st.success("Files loaded")
 
+    # Static mappings
     product_upc1 = "ProductUPC"
     product_upc2 = "UnitUPC"
     product_desc = "Product Name"
@@ -179,6 +192,7 @@ if adm_file and product_file and store_file:
     sf_store = "Store"
     sf_family = "Family"
 
+    # Validation
     required_product_cols = [
         "ProductUPC", "UnitUPC", "Product Name", "ProductId", "Family"
     ]
@@ -192,6 +206,7 @@ if adm_file and product_file and store_file:
         st.error("❌ Store Family file format incorrect")
         st.stop()
 
+    # ADM selection
     st.header("Select ADM Columns")
 
     main_upc = st.selectbox("Main UPC", main_df.columns)
@@ -334,7 +349,7 @@ if adm_file and product_file and store_file:
         summary = merged["Match Type"].value_counts().reset_index()
         summary.columns = ["Match Type", "Count"]
 
-        # FAMILY INFERENCE ONLY
+        # 🔥 SMART INFERENCE
         results = unmatched_df["Description"].apply(
             lambda x: infer_family_smart(x, product_df, product_desc, product_family)
         )
@@ -363,6 +378,7 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
+        # EXPORT
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             merged.to_excel(writer, sheet_name="Full Output", index=False)
