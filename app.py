@@ -33,7 +33,7 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# NEW: TYPE + FAMILY HELPERS
+# TYPE + FAMILY HELPERS
 # ==============================
 def extract_family(desc, product_df, family_col):
     desc = str(desc).lower()
@@ -72,27 +72,50 @@ if adm_file and product_file and store_file:
 
     st.success("Files loaded")
 
-    st.header("Select Columns")
+    # ==============================
+    # STATIC COLUMN DEFINITIONS
+    # ==============================
+    product_upc1 = "ProductUPC"
+    product_upc2 = "UnitUPC"
+    product_desc = "Product Name"
+    product_uid = "ProductId"
+    product_family = "Family"
 
-    col1, col2, col3 = st.columns(3)
+    sf_store = "Store"
+    sf_family = "Family"
+
+    # ==============================
+    # VALIDATION
+    # ==============================
+    required_product_cols = [
+        "ProductUPC", "UnitUPC", "Product Name", "ProductId", "Family"
+    ]
+    required_sf_cols = ["Store", "Family"]
+
+    missing_product = [c for c in required_product_cols if c not in product_df.columns]
+    missing_sf = [c for c in required_sf_cols if c not in sf_df.columns]
+
+    if missing_product:
+        st.error(f"❌ Product file missing columns: {missing_product}")
+        st.stop()
+
+    if missing_sf:
+        st.error(f"❌ Store Family file missing columns: {missing_sf}")
+        st.stop()
+
+    # ==============================
+    # ADM COLUMN SELECTION
+    # ==============================
+    st.header("Select ADM Columns")
+
+    col1 = st.columns(1)[0]
 
     with col1:
         main_upc = st.selectbox("Main UPC", main_df.columns)
         main_desc = st.selectbox("Main Description", main_df.columns)
         main_store = st.selectbox("Main Store", main_df.columns)
 
-    with col2:
-        product_upc1 = st.selectbox("Product UPC 1", product_df.columns)
-        product_upc2 = st.selectbox("Product UPC 2", product_df.columns)
-        product_desc = st.selectbox("Product Description", product_df.columns)
-        product_uid = st.selectbox("Product UID", product_df.columns)
-        product_family = st.selectbox("Product Family", product_df.columns)
-
-    with col3:
-        sf_store = st.selectbox("Store Column", sf_df.columns)
-        sf_family = st.selectbox("Family Column", sf_df.columns)
-
-    st.info("Select columns, then click Process")
+    st.info("Click Process")
 
     # ==============================
     # PROCESS
@@ -102,10 +125,11 @@ if adm_file and product_file and store_file:
         progress = st.progress(0)
         status = st.empty()
 
-        # STEP 1
+        # STEP 1 CLEAN
         status.text("🔄 Cleaning data...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
+
         generate_keys(main_df, main_upc, "m")
 
         product_df["UPC_list"] = product_df[[product_upc1, product_upc2]].values.tolist()
@@ -114,7 +138,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(20)
 
-        # STEP 2
+        # STEP 2 UPC MATCH
         status.text("🔎 Matching exact UPCs...")
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
@@ -127,18 +151,34 @@ if adm_file and product_file and store_file:
 
         progress.progress(40)
 
-        # STEP 3 (MATCHING)
+        # STEP 3 MATCHING
         status.text("🧠 Running smart matching...")
+
         product_df["p_12_str"] = product_df["p_12"].astype(str)
 
         def fuzzy_match(row):
-            # UPC match already found
+
+            # 1️⃣ UPC match already found
             if isinstance(row["All Retail UIDs"], list):
                 return row["All Retail UIDs"], row["All Families"], 100, "UPC Match"
 
-            upc10 = row["m_10"]
             desc = row["desc_clean"]
+            upc10 = row["m_10"]
 
+            # 2️⃣ EXACT DESCRIPTION MATCH FIRST (NEW FIX)
+            exact_desc_matches = product_df[
+                product_df["desc_clean"] == desc
+            ]
+
+            if not exact_desc_matches.empty:
+                return (
+                    list(set(exact_desc_matches[product_uid])),
+                    list(set(exact_desc_matches[product_family])),
+                    100,
+                    "Exact Description Match"
+                )
+
+            # 3️⃣ 10 DIGIT + FUZZY
             candidates = product_df[
                 product_df["p_12_str"].str.contains(upc10, na=False)
             ]
@@ -156,21 +196,6 @@ if adm_file and product_file and store_file:
             if all_uids:
                 return list(set(all_uids)), list(set(all_families)), best_score, "10-digit Fuzzy Match"
 
-            # ==============================
-            # FINAL: EXACT DESCRIPTION MATCH
-            # ==============================
-            exact_desc_matches = product_df[
-                product_df["desc_clean"] == desc
-            ]
-
-            if not exact_desc_matches.empty:
-                return (
-                    list(set(exact_desc_matches[product_uid])),
-                    list(set(exact_desc_matches[product_family])),
-                    100,
-                    "Exact Description Match"
-                )
-
             return None, None, 0, "No Match"
 
         results = merged.apply(fuzzy_match, axis=1)
@@ -182,8 +207,9 @@ if adm_file and product_file and store_file:
 
         progress.progress(70)
 
-        # STEP 4
+        # STEP 4 STORE FAMILY VALIDATION
         status.text("🏪 Validating store-family...")
+
         merged["Retail UID"] = merged["All Retail UIDs"].apply(
             lambda x: x[0] if isinstance(x, list) else None
         )
@@ -233,9 +259,7 @@ if adm_file and product_file and store_file:
         summary = merged["Match Type"].value_counts().reset_index()
         summary.columns = ["Match Type", "Count"]
 
-        # ==============================
         # TYPE + FAMILY INFERENCE
-        # ==============================
         unmatched_df["Family"] = unmatched_df["Description"].apply(
             lambda x: extract_family(x, product_df, product_family)
         )
@@ -244,9 +268,7 @@ if adm_file and product_file and store_file:
             lambda x: extract_type(x, product_df)
         )
 
-        # ==============================
         # PRODUCT TEMPLATE
-        # ==============================
         template_df = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
             "UnitId": "",
