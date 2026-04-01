@@ -119,7 +119,6 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
     top_matches = sorted(scored, key=lambda x: x[0], reverse=True)[:10]
 
     word_counter = Counter()
-
     for _, row in top_matches:
         words = clean_for_matching(row[product_desc_col], product_vocab).split()
         word_counter.update(set(words))
@@ -171,7 +170,6 @@ if adm_file and product_file and store_file:
 
     st.success("Files loaded")
 
-    # Static mappings
     product_upc1 = "ProductUPC"
     product_upc2 = "UnitUPC"
     product_desc = "Product Name"
@@ -181,7 +179,6 @@ if adm_file and product_file and store_file:
     sf_store = "Store"
     sf_family = "Family"
 
-    # Validation
     required_product_cols = [
         "ProductUPC", "UnitUPC", "Product Name", "ProductId", "Family"
     ]
@@ -195,7 +192,6 @@ if adm_file and product_file and store_file:
         st.error("❌ Store Family file format incorrect")
         st.stop()
 
-    # ADM selection
     st.header("Select ADM Columns")
 
     main_upc = st.selectbox("Main UPC", main_df.columns)
@@ -338,7 +334,7 @@ if adm_file and product_file and store_file:
         summary = merged["Match Type"].value_counts().reset_index()
         summary.columns = ["Match Type", "Count"]
 
-        # FAMILY INFERENCE ONLY (no package logic)
+        # FAMILY INFERENCE ONLY
         results = unmatched_df["Description"].apply(
             lambda x: infer_family_smart(x, product_df, product_desc, product_family)
         )
@@ -346,7 +342,7 @@ if adm_file and product_file and store_file:
         unmatched_df["Family"] = results.apply(lambda x: x[0])
         unmatched_df["Type"] = results.apply(lambda x: x[1])
 
-        # TEMPLATE (clean)
+        # TEMPLATE
         template_df = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
             "UnitId": "",
@@ -367,7 +363,6 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
-        # EXPORT
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             merged.to_excel(writer, sheet_name="Full Output", index=False)
