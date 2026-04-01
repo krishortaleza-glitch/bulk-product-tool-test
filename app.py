@@ -29,13 +29,6 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_12"] = s.str.zfill(12)
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
-def safe_mode(df, col):
-    if col not in df.columns or df.empty:
-        return ""
-    if df[col].mode().empty:
-        return ""
-    return df[col].mode().iloc[0]
-
 def parse_pack(desc):
     desc = str(desc).lower()
     group, size, unit = "", "", ""
@@ -86,7 +79,7 @@ if adm_file and product_file and store_file:
 
         try:
             # ==============================
-            # PROCESS DATA FIRST
+            # PROCESS
             # ==============================
             main_df["desc_clean"] = clean_desc(main_df[main_desc])
             product_df["desc_clean"] = clean_desc(product_df[product_desc])
@@ -145,25 +138,23 @@ if adm_file and product_file and store_file:
             })
 
             # ==============================
-            # EXPORT (NO CONTEXT MANAGER)
+            # EXPORT
             # ==============================
             output = BytesIO()
             writer = pd.ExcelWriter(output, engine="openpyxl")
 
-            # ✅ ALWAYS WRITE FIRST SHEET
-            pd.DataFrame({"Status": ["OK"]}).to_excel(writer, "Status", index=False)
+            pd.DataFrame({"Status": ["OK"]}).to_excel(writer, sheet_name="Status", index=False)
 
             if not merged.empty:
-                merged.to_excel(writer, "Full Output", index=False)
+                merged.to_excel(writer, sheet_name="Full Output", index=False)
 
             if not unmatched_df.empty:
-                unmatched_df.to_excel(writer, "Unmatched", index=False)
+                unmatched_df.to_excel(writer, sheet_name="Unmatched", index=False)
 
             if not template_df.empty:
-                template_df.to_excel(writer, "Product Template", index=False)
+                template_df.to_excel(writer, sheet_name="Product Template", index=False)
 
-            writer.close()  # 🔥 IMPORTANT
-
+            writer.close()
             output.seek(0)
 
             st.download_button(
