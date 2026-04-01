@@ -7,6 +7,9 @@ from rapidfuzz import fuzz
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
+# ==============================
+# LOAD
+# ==============================
 @st.cache_data
 def load_file(file):
     return pd.read_excel(file)
@@ -30,11 +33,11 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# NEW HELPERS (SAFE ADDITION)
+# NEW: TYPE + FAMILY HELPERS
 # ==============================
-def extract_family(desc, product_df, product_family_col):
+def extract_family(desc, product_df, family_col):
     desc = str(desc).lower()
-    families = product_df[product_family_col].dropna().unique()
+    families = product_df[family_col].dropna().unique()
 
     for fam in families:
         if str(fam).lower() in desc:
@@ -44,12 +47,9 @@ def extract_family(desc, product_df, product_family_col):
 def extract_type(family, product_df):
     if not family or "Type" not in product_df.columns:
         return ""
-
     candidates = product_df[product_df["Family"] == family]
-
     if candidates.empty:
         return ""
-
     try:
         return candidates["Type"].mode().iloc[0]
     except:
@@ -94,6 +94,9 @@ if adm_file and product_file and store_file:
 
     st.info("Select columns, then click Process")
 
+    # ==============================
+    # PROCESS
+    # ==============================
     if st.button("🚀 Process Files"):
 
         progress = st.progress(0)
@@ -124,11 +127,12 @@ if adm_file and product_file and store_file:
 
         progress.progress(40)
 
-        # STEP 3 (UNCHANGED)
+        # STEP 3 (MATCHING)
         status.text("🧠 Running smart matching...")
         product_df["p_12_str"] = product_df["p_12"].astype(str)
 
         def fuzzy_match(row):
+            # UPC match already found
             if isinstance(row["All Retail UIDs"], list):
                 return row["All Retail UIDs"], row["All Families"], 100, "UPC Match"
 
@@ -149,10 +153,25 @@ if adm_file and product_file and store_file:
                     all_families.append(r[product_family])
                     best_score = max(best_score, score)
 
-            if not all_uids:
-                return None, None, 0, "No Match"
+            if all_uids:
+                return list(set(all_uids)), list(set(all_families)), best_score, "10-digit Fuzzy Match"
 
-            return list(set(all_uids)), list(set(all_families)), best_score, "10-digit Fuzzy Match"
+            # ==============================
+            # FINAL: EXACT DESCRIPTION MATCH
+            # ==============================
+            exact_desc_matches = product_df[
+                product_df["desc_clean"] == desc
+            ]
+
+            if not exact_desc_matches.empty:
+                return (
+                    list(set(exact_desc_matches[product_uid])),
+                    list(set(exact_desc_matches[product_family])),
+                    100,
+                    "Exact Description Match"
+                )
+
+            return None, None, 0, "No Match"
 
         results = merged.apply(fuzzy_match, axis=1)
 
@@ -186,7 +205,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(85)
 
-        # STEP 5 OUTPUT (UNCHANGED)
+        # STEP 5 OUTPUT
         status.text("📊 Building output...")
 
         good_df = merged[
@@ -215,7 +234,7 @@ if adm_file and product_file and store_file:
         summary.columns = ["Match Type", "Count"]
 
         # ==============================
-        # NEW: TYPE + FAMILY INFERENCE
+        # TYPE + FAMILY INFERENCE
         # ==============================
         unmatched_df["Family"] = unmatched_df["Description"].apply(
             lambda x: extract_family(x, product_df, product_family)
@@ -226,7 +245,7 @@ if adm_file and product_file and store_file:
         )
 
         # ==============================
-        # NEW: PRODUCT TEMPLATE
+        # PRODUCT TEMPLATE
         # ==============================
         template_df = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
