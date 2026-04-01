@@ -353,24 +353,27 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
-        # EXPORT
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            merged.to_excel(writer, sheet_name="Full Output", index=False)
-            summary.to_excel(writer, sheet_name="Summary", index=False)
-            good_df.to_excel(writer, sheet_name="Good To Go", index=False)
-            invalid_df.to_excel(writer, sheet_name="Invalid For Portal", index=False)
-            unmatched_df.to_excel(writer, sheet_name="Unmatched Products", index=False)
-            invalid_sf_df.to_excel(writer, sheet_name="Invalid Store Family", index=False)
-            template_df.to_excel(writer, sheet_name="Product Template", index=False)
+        # EXPORT (BULLETPROOF)
+import tempfile
 
-        output.seek(0)
+with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+    temp_path = tmp.name
 
-        progress.progress(100)
-        status.text("✅ Done!")
+with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+    merged.to_excel(writer, sheet_name="Full Output", index=False)
+    summary.to_excel(writer, sheet_name="Summary", index=False)
+    good_df.to_excel(writer, sheet_name="Good To Go", index=False)
+    invalid_df.to_excel(writer, sheet_name="Invalid For Portal", index=False)
+    unmatched_df.to_excel(writer, sheet_name="Unmatched Products", index=False)
+    invalid_sf_df.to_excel(writer, sheet_name="Invalid Store Family", index=False)
+    template_df.to_excel(writer, sheet_name="Product Template", index=False)
 
-        st.download_button(
-            "📥 Download Processed File",
-            data=output.getvalue(),
-            file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-        )
+# Read file back as bytes
+with open(temp_path, "rb") as f:
+    file_bytes = f.read()
+
+st.download_button(
+    "📥 Download Processed File",
+    data=file_bytes,
+    file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+)
