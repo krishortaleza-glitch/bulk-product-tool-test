@@ -15,24 +15,9 @@ def load_file(file):
 # ==============================
 # HELPERS
 # ==============================
-def clean_upc(series):
-    return (
-        series.astype(str)
-        .str.replace(r"\.0$", "", regex=True)
-        .str.replace(r"\D", "", regex=True)
-    )
-
 def clean_desc(series):
     return series.astype(str).str.lower().str.strip()
 
-def generate_keys(df, col, prefix):
-    s = clean_upc(df[col])
-    df[f"{prefix}_12"] = s.str.zfill(12)
-    df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
-
-# ==============================
-# PARSE PACK
-# ==============================
 def parse_pack(desc):
     desc = str(desc).lower()
     group, size, unit = None, None, None
@@ -64,18 +49,17 @@ def parse_pack(desc):
 
     return group, size, unit
 
-# ==============================
-# BRAND DETECTION
-# ==============================
 def extract_brand_phrase(desc):
     words = str(desc).lower().split()
     return " ".join(words[:3])
 
 def detect_brand(desc, brand_list):
     desc = str(desc).lower()
+
     for b in sorted(brand_list, key=len, reverse=True):
         if b in desc:
             return b
+
     match = process.extractOne(desc, brand_list, scorer=fuzz.partial_ratio)
     return match[0] if match and match[1] >= 85 else None
 
@@ -87,7 +71,10 @@ def infer_attributes(desc, product_df, product_desc, group_size_map, brand_list)
     group, size, unit = parse_pack(desc_clean)
     brand = detect_brand(desc_clean, brand_list)
 
-    # GROUP + SIZE MATCH
+    def safe_mode(df, col):
+        return df[col].mode().iloc[0] if col in df and not df[col].mode().empty else None
+
+    # GROUP + SIZE
     if group and size:
         config = group_size_map.get((group, size))
         if config:
@@ -101,13 +88,9 @@ def infer_attributes(desc, product_df, product_desc, group_size_map, brand_list)
                 "Unit Measure": config.get("Unit Measure") or unit,
             }
 
-    # FALLBACK
+    # fallback
     group_rows = product_df[product_df["Group"] == group]
 
-    def safe_mode(df, col):
-        return df[col].mode().iloc[0] if col in df and not df[col].mode().empty else None
-
-    # Type + Family from fuzzy
     if brand:
         candidates = product_df[
             product_df[product_desc].astype(str).str.lower().str.contains(brand, na=False)
@@ -150,20 +133,21 @@ if adm_file and product_file and store_file:
 
     product_df.columns = product_df.columns.str.strip()
 
-    # Build maps
+    # Build brand list
     product_df["brand"] = product_df["Product Name"].apply(extract_brand_phrase)
     brand_list = product_df["brand"].dropna().value_counts().head(300).index.tolist()
 
+    # Group + size map
     group_size_map = product_df.groupby(["Group", "Unit Size"]).agg({
         "Products/Case": lambda x: x.mode().iloc[0] if not x.mode().empty else None,
         "Units/Product": lambda x: x.mode().iloc[0] if not x.mode().empty else None,
         "Unit Measure": lambda x: x.mode().iloc[0] if not x.mode().empty else None,
     }).to_dict("index")
 
-    # SIMPLE MATCH (no fuzzy UPC now)
+    # CLEAN
     main_df["desc_clean"] = clean_desc(main_df.iloc[:,1])
-    product_df["desc_clean"] = clean_desc(product_df["Product Name"])
 
+    # INITIALIZE
     merged = main_df.copy()
     merged["Retail UID"] = None
     merged["Family"] = None
@@ -176,7 +160,7 @@ if adm_file and product_file and store_file:
     valid_keys = set(sf_df["store_family_key"])
     merged["Valid Store-Family"] = merged["store_family_key"].isin(valid_keys)
 
-    # REASON
+    # REASON TAGGING
     def get_reason(row):
         if pd.isna(row["Retail UID"]) and not row["Valid Store-Family"]:
             return "No Match + Invalid Store-Family"
@@ -225,11 +209,36 @@ if adm_file and product_file and store_file:
         "Family Head": "false"
     })
 
-    # EXPORT
+    # DEBUG INFO
+    st.write("Rows → merged:", len(merged))
+    st.write("Rows → unmatched:", len(unmatched_df))
+    st.write("Rows → template:", len(product_template))
+
+    # EXPORT (FIXED)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        merged.to_excel(writer, "Full Output", index=False)
-        unmatched_df.to_excel(writer, "Unmatched", index=False)
-        product_template.to_excel(writer, "Product Template", index=False)
 
-    st.download_button("Download", data=output.getvalue(), file_name="output.xlsx")
+        sheets_written = False
+
+        if not merged.empty:
+            merged.to_excel(writer, "Full Output", index=False)
+            sheets_written = True
+
+        if not unmatched_df.empty:
+            unmatched_df.to_excel(writer, "Unmatched", index=False)
+            sheets_written = True
+
+        if not product_template.empty:
+            product_template.to_excel(writer, "Product Template", index=False)
+            sheets_written = True
+
+        if not sheets_written:
+            pd.DataFrame({"Message":["No data available"]}).to_excel(writer, "Empty", index=False)
+
+    output.seek(0)
+
+    st.download_button(
+        "📥 Download File",
+        data=output,
+        file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    )
