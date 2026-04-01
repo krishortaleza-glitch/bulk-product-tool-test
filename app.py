@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 from io import BytesIO
 from rapidfuzz import fuzz
+import re
 
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
@@ -36,22 +37,30 @@ def normalize_text(text):
         .strip()
     )
 
+def clean_for_matching(text):
+    text = normalize_text(text)
+
+    # Remove package noise
+    text = re.sub(r"\b\d+/\d+\w*\b", "", text)     # 12/12c
+    text = re.sub(r"\b\d+\s?(pk|pack|ct)\b", "", text)  # 6pk
+    text = re.sub(r"\b\d+(oz|ml|l)\b", "", text)  # 12oz
+
+    return text.strip()
+
 def generate_keys(df, col, prefix):
     s = clean_upc(df[col])
     df[f"{prefix}_12"] = s.str.zfill(12)
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# 🔥 BRAND + FAMILY INFERENCE
+# 🔥 FAMILY + TYPE INFERENCE
 # ==============================
 def get_brand(desc):
     words = desc.split()
     return words[0] if words else ""
 
 def extract_family(desc, product_df, family_col):
-    desc_clean = normalize_text(desc)
-    desc_words = set(desc_clean.split())
-
+    desc_clean = clean_for_matching(desc)
     brand = get_brand(desc_clean)
 
     families = product_df[family_col].dropna().unique()
@@ -60,31 +69,27 @@ def extract_family(desc, product_df, family_col):
     best_score = 0
 
     for fam in families:
-        fam_clean = normalize_text(fam)
+        fam_clean = clean_for_matching(fam)
 
-        # 🔥 BRAND FILTER
+        # Brand filter
         if brand and brand not in fam_clean:
             continue
 
-        fam_words = set(fam_clean.split())
-        overlap = len(desc_words.intersection(fam_words))
+        # Multi scoring
+        score1 = fuzz.token_set_ratio(desc_clean, fam_clean)
+        score2 = fuzz.partial_ratio(desc_clean, fam_clean)
 
-        score = fuzz.token_set_ratio(desc_clean, fam_clean)
+        score = max(score1, score2)
 
-        # Boost if phrase appears
+        # Boost if exact phrase appears
         if fam_clean in desc_clean:
             score += 10
-
-        # Boost if at least some overlap
-        if overlap > 0:
-            score += 5
 
         if score > best_score:
             best_score = score
             best_match = fam
 
-    # Slightly relaxed threshold
-    if best_score >= 80:
+    if best_score >= 75:
         return best_match
 
     return ""
@@ -119,9 +124,7 @@ if adm_file and product_file and store_file:
 
     st.success("Files loaded")
 
-    # ==============================
-    # STATIC COLUMN DEFINITIONS
-    # ==============================
+    # Static mappings
     product_upc1 = "ProductUPC"
     product_upc2 = "UnitUPC"
     product_desc = "Product Name"
@@ -131,9 +134,7 @@ if adm_file and product_file and store_file:
     sf_store = "Store"
     sf_family = "Family"
 
-    # ==============================
-    # VALIDATION
-    # ==============================
+    # Validation
     required_product_cols = [
         "ProductUPC", "UnitUPC", "Product Name", "ProductId", "Family"
     ]
@@ -147,9 +148,7 @@ if adm_file and product_file and store_file:
         st.error("❌ Store Family file format incorrect")
         st.stop()
 
-    # ==============================
-    # ADM COLUMN SELECTION
-    # ==============================
+    # ADM selection
     st.header("Select ADM Columns")
 
     main_upc = st.selectbox("Main UPC", main_df.columns)
@@ -200,7 +199,7 @@ if adm_file and product_file and store_file:
             desc = row["desc_clean"]
             upc10 = row["m_10"]
 
-            # EXACT DESCRIPTION MATCH
+            # Exact match
             exact_desc_matches = product_df[
                 product_df["desc_clean"] == desc
             ]
@@ -213,7 +212,7 @@ if adm_file and product_file and store_file:
                     "Exact Description Match"
                 )
 
-            # FUZZY MATCH
+            # Fuzzy
             candidates = product_df[
                 product_df["p_12_str"].str.contains(upc10, na=False)
             ]
@@ -303,7 +302,7 @@ if adm_file and product_file and store_file:
             lambda x: extract_type(x, product_df)
         )
 
-        # PRODUCT TEMPLATE
+        # TEMPLATE
         template_df = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
             "UnitId": "",
