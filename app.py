@@ -8,6 +8,9 @@ import re
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
+# ==============================
+# LOAD
+# ==============================
 @st.cache_data
 def load_file(file):
     return pd.read_excel(file)
@@ -29,6 +32,13 @@ def generate_keys(df, col, prefix):
     s = clean_upc(df[col])
     df[f"{prefix}_12"] = s.str.zfill(12)
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
+
+def safe_mode(df, col):
+    if col not in df.columns or df.empty:
+        return ""
+    if df[col].mode().empty:
+        return ""
+    return df[col].mode().iloc[0]
 
 # ==============================
 # PACK PARSER
@@ -52,16 +62,6 @@ def parse_pack(desc):
     return group, size, unit
 
 # ==============================
-# SAFE MODE HELPER
-# ==============================
-def safe_mode(df, col):
-    if col not in df.columns or df.empty:
-        return ""
-    if df[col].mode().empty:
-        return ""
-    return df[col].mode().iloc[0]
-
-# ==============================
 # UI
 # ==============================
 st.header("Upload Files")
@@ -76,13 +76,13 @@ if adm_file and product_file and store_file:
     product_df = load_file(product_file)
     sf_df = load_file(store_file)
 
-    # 🔥 normalize headers (IMPORTANT)
     product_df.columns = product_df.columns.str.strip()
 
     st.success("Files loaded")
 
-    st.header("Select Columns")
-
+    # ==============================
+    # COLUMN SELECTORS
+    # ==============================
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -106,7 +106,9 @@ if adm_file and product_file and store_file:
         progress = st.progress(0)
         status = st.empty()
 
+        # ==============================
         # CLEAN
+        # ==============================
         status.text("Cleaning...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
@@ -118,7 +120,9 @@ if adm_file and product_file and store_file:
 
         progress.progress(20)
 
+        # ==============================
         # MATCH
+        # ==============================
         status.text("Matching...")
 
         map_12 = product_df.groupby("p_12").agg({
@@ -133,6 +137,7 @@ if adm_file and product_file and store_file:
                 return row[product_uid], row[product_family], "UPC Match"
 
             upc10 = row["m_10"]
+
             candidates = product_df[
                 product_df["p_12"].astype(str).str.contains(upc10, na=False)
             ]
@@ -150,12 +155,16 @@ if adm_file and product_file and store_file:
 
         progress.progress(60)
 
+        # ==============================
         # STORE VALIDATION
+        # ==============================
         merged["store_family_key"] = merged[main_store].astype(str) + "|" + merged["Family"].astype(str)
         sf_df["store_family_key"] = sf_df[sf_store].astype(str) + "|" + sf_df[sf_family].astype(str)
         merged["Valid Store-Family"] = merged["store_family_key"].isin(set(sf_df["store_family_key"]))
 
-        # REASON
+        # ==============================
+        # REASON TAGGING
+        # ==============================
         def get_reason(row):
             if pd.isna(row["Retail UID"]) and not row["Valid Store-Family"]:
                 return "No Match + Invalid Store-Family"
@@ -169,33 +178,37 @@ if adm_file and product_file and store_file:
 
         progress.progress(75)
 
-        # OUTPUTS
+        # ==============================
+        # UNMATCHED (DEDUPED)
+        # ==============================
         unmatched_df = merged[merged["Match Type"] == "No Match"][
             [main_upc, main_desc]
         ].drop_duplicates()
 
         unmatched_df.columns = ["UPC", "Description"]
 
-        # STEP 5
-        pack_data = unmatched_df["Description"].apply(parse_pack)
-        unmatched_df["Group"] = pack_data.apply(lambda x: x[0])
-        unmatched_df["Unit Size"] = pack_data.apply(lambda x: x[1])
-        unmatched_df["Unit Measure"] = pack_data.apply(lambda x: x[2])
+        # ==============================
+        # STEP 5: PARSE PACK
+        # ==============================
+        pack = unmatched_df["Description"].apply(parse_pack)
+        unmatched_df["Group"] = pack.apply(lambda x: x[0])
+        unmatched_df["Unit Size"] = pack.apply(lambda x: x[1])
+        unmatched_df["Unit Measure"] = pack.apply(lambda x: x[2])
 
         # ==============================
-        # STEP 6: INFERENCE
+        # STEP 6: INFER CONFIG
         # ==============================
         def infer_config(row):
-            group = row["Group"]
-            size = row["Unit Size"]
+            group = row.get("Group", "")
+            size = str(row.get("Unit Size", ""))
 
-            candidates = product_df
+            candidates = product_df.copy()
 
-            if "Group" in product_df.columns:
+            if "Group" in candidates.columns:
                 candidates = candidates[candidates["Group"] == group]
 
-            if "Unit Size" in product_df.columns and size:
-                candidates = candidates[candidates["Unit Size"].astype(str) == str(size)]
+            if "Unit Size" in candidates.columns and size:
+                candidates = candidates[candidates["Unit Size"].astype(str) == size]
 
             return pd.Series({
                 "Products/Case": safe_mode(candidates, "Products/Case"),
@@ -206,7 +219,9 @@ if adm_file and product_file and store_file:
         unmatched_df["Products/Case"] = config["Products/Case"]
         unmatched_df["Units/Product"] = config["Units/Product"]
 
-        # TEMPLATE
+        # ==============================
+        # PRODUCT TEMPLATE
+        # ==============================
         template_df = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
             "UnitId": "",
@@ -227,12 +242,29 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
-        # EXPORT
+        # ==============================
+        # EXPORT (SAFE)
+        # ==============================
         output = BytesIO()
+
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            template_df.to_excel(writer, "Product Template", index=False)
-            unmatched_df.to_excel(writer, "Unmatched", index=False)
-            merged.to_excel(writer, "Full Output", index=False)
+
+            wrote = False
+
+            if not merged.empty:
+                merged.to_excel(writer, "Full Output", index=False)
+                wrote = True
+
+            if not unmatched_df.empty:
+                unmatched_df.to_excel(writer, "Unmatched", index=False)
+                wrote = True
+
+            if not template_df.empty:
+                template_df.to_excel(writer, "Product Template", index=False)
+                wrote = True
+
+            if not wrote:
+                pd.DataFrame({"Message": ["No data"]}).to_excel(writer, "Empty", index=False)
 
         output.seek(0)
 
