@@ -27,14 +27,6 @@ def clean_upc(series):
 def clean_desc(series):
     return series.astype(str).str.lower().str.strip()
 
-def generate_keys(df, col, prefix):
-    s = clean_upc(df[col])
-    df[f"{prefix}_12"] = s.str.zfill(12)
-    df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
-
-# ==============================
-# 🔥 IMPROVED FAMILY INFERENCE
-# ==============================
 def normalize_text(text):
     return (
         str(text)
@@ -44,36 +36,55 @@ def normalize_text(text):
         .strip()
     )
 
+def generate_keys(df, col, prefix):
+    s = clean_upc(df[col])
+    df[f"{prefix}_12"] = s.str.zfill(12)
+    df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
+
+# ==============================
+# 🔥 BRAND + FAMILY INFERENCE
+# ==============================
+def get_brand(desc):
+    words = desc.split()
+    return words[0] if words else ""
+
 def extract_family(desc, product_df, family_col):
     desc_clean = normalize_text(desc)
+    desc_words = set(desc_clean.split())
+
+    brand = get_brand(desc_clean)
 
     families = product_df[family_col].dropna().unique()
 
     best_match = ""
     best_score = 0
 
-    desc_words = set(desc_clean.split())
-
     for fam in families:
         fam_clean = normalize_text(fam)
-        fam_words = set(fam_clean.split())
 
-        # Guardrail: require at least 1 overlapping word
-        if len(desc_words.intersection(fam_words)) == 0:
+        # 🔥 BRAND FILTER
+        if brand and brand not in fam_clean:
             continue
+
+        fam_words = set(fam_clean.split())
+        overlap = len(desc_words.intersection(fam_words))
 
         score = fuzz.token_set_ratio(desc_clean, fam_clean)
 
-        # Boost if full phrase appears
+        # Boost if phrase appears
         if fam_clean in desc_clean:
             score += 10
+
+        # Boost if at least some overlap
+        if overlap > 0:
+            score += 5
 
         if score > best_score:
             best_score = score
             best_match = fam
 
-    # Threshold (tune if needed)
-    if best_score >= 85:
+    # Slightly relaxed threshold
+    if best_score >= 80:
         return best_match
 
     return ""
@@ -128,15 +139,12 @@ if adm_file and product_file and store_file:
     ]
     required_sf_cols = ["Store", "Family"]
 
-    missing_product = [c for c in required_product_cols if c not in product_df.columns]
-    missing_sf = [c for c in required_sf_cols if c not in sf_df.columns]
-
-    if missing_product:
-        st.error(f"❌ Product file missing columns: {missing_product}")
+    if any(c not in product_df.columns for c in required_product_cols):
+        st.error("❌ Product file format incorrect")
         st.stop()
 
-    if missing_sf:
-        st.error(f"❌ Store Family file missing columns: {missing_sf}")
+    if any(c not in sf_df.columns for c in required_sf_cols):
+        st.error("❌ Store Family file format incorrect")
         st.stop()
 
     # ==============================
@@ -144,12 +152,9 @@ if adm_file and product_file and store_file:
     # ==============================
     st.header("Select ADM Columns")
 
-    col1 = st.columns(1)[0]
-
-    with col1:
-        main_upc = st.selectbox("Main UPC", main_df.columns)
-        main_desc = st.selectbox("Main Description", main_df.columns)
-        main_store = st.selectbox("Main Store", main_df.columns)
+    main_upc = st.selectbox("Main UPC", main_df.columns)
+    main_desc = st.selectbox("Main Description", main_df.columns)
+    main_store = st.selectbox("Main Store", main_df.columns)
 
     if st.button("🚀 Process Files"):
 
@@ -189,7 +194,6 @@ if adm_file and product_file and store_file:
 
         def fuzzy_match(row):
 
-            # UPC match
             if isinstance(row["All Retail UIDs"], list):
                 return row["All Retail UIDs"], row["All Families"], 100, "UPC Match"
 
@@ -290,7 +294,7 @@ if adm_file and product_file and store_file:
         summary = merged["Match Type"].value_counts().reset_index()
         summary.columns = ["Match Type", "Count"]
 
-        # 🔥 IMPROVED INFERENCE APPLIED HERE
+        # 🔥 APPLY IMPROVED INFERENCE
         unmatched_df["Family"] = unmatched_df["Description"].apply(
             lambda x: extract_family(x, product_df, product_family)
         )
