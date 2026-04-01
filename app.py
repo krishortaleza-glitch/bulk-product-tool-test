@@ -53,20 +53,6 @@ def parse_pack(desc):
     return group, size, unit
 
 # ==============================
-# NEW: BRAND DETECTION
-# ==============================
-def build_brand_list(df, product_desc):
-    phrases = df[product_desc].astype(str).str.lower().str.split().str[:3].str.join(" ")
-    return phrases.value_counts().head(200).index.tolist()
-
-def detect_brand(desc, brand_list):
-    desc = str(desc).lower()
-    for b in sorted(brand_list, key=len, reverse=True):
-        if b in desc:
-            return b
-    return None
-
-# ==============================
 # UI
 # ==============================
 st.header("Upload Files")
@@ -113,19 +99,31 @@ if adm_file and product_file and store_file:
         progress = st.progress(0)
         status = st.empty()
 
+        # ==============================
         # CLEAN
+        # ==============================
         status.text("🔄 Cleaning data...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
         generate_keys(main_df, main_upc, "m")
 
-        product_df["UPC_list"] = product_df[[product_upc1, product_upc2]].values.tolist()
-        product_df = product_df.explode("UPC_list")
+        # safer explode
+        df1 = product_df.copy()
+        df1["UPC_list"] = df1[product_upc1]
+
+        df2 = product_df.copy()
+        df2["UPC_list"] = df2[product_upc2]
+
+        product_df = pd.concat([df1, df2], ignore_index=True)
+        product_df = product_df.dropna(subset=["UPC_list"])
+
         generate_keys(product_df, "UPC_list", "p")
 
         progress.progress(20)
 
+        # ==============================
         # MATCH
+        # ==============================
         status.text("🔎 Matching...")
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
@@ -154,13 +152,17 @@ if adm_file and product_file and store_file:
 
         progress.progress(60)
 
+        # ==============================
         # STORE VALIDATION
+        # ==============================
         merged["store_family_key"] = merged[main_store].astype(str) + "|" + merged["Family"].astype(str)
         sf_df["store_family_key"] = sf_df[sf_store].astype(str) + "|" + sf_df[sf_family].astype(str)
 
         merged["Valid Store-Family"] = merged["store_family_key"].isin(set(sf_df["store_family_key"]))
 
-        # NEW: REASON TAG
+        # ==============================
+        # REASON TAGGING
+        # ==============================
         def get_reason(row):
             if pd.isna(row["Retail UID"]) and not row["Valid Store-Family"]:
                 return "No Match + Invalid Store-Family"
@@ -172,9 +174,11 @@ if adm_file and product_file and store_file:
 
         merged["Reason"] = merged.apply(get_reason, axis=1)
 
-        progress.progress(80)
+        progress.progress(75)
 
-        # OUTPUT
+        # ==============================
+        # OUTPUTS
+        # ==============================
         good_df = merged[merged["Reason"] == "Good"][[main_store, "Retail UID"]].drop_duplicates()
         invalid_df = merged[merged["Reason"] != "Good"][[main_store, main_upc, main_desc, "Reason"]]
 
@@ -184,15 +188,29 @@ if adm_file and product_file and store_file:
 
         unmatched_df.columns = ["UPC", "Description"]
 
-        # NEW: INFERENCE
-        brand_list = build_brand_list(product_df, product_desc)
-
+        # ==============================
+        # SAFE INFERENCE
+        # ==============================
         def infer(desc):
             group, size, unit = parse_pack(desc)
+
+            if "Group" not in product_df.columns:
+                return pd.Series({
+                    "Group": group,
+                    "Products/Case": None,
+                    "Units/Product": None,
+                    "Unit Size": size,
+                    "Unit Measure": unit,
+                })
+
             rows = product_df[product_df["Group"] == group]
 
             def mode(col):
-                return rows[col].mode().iloc[0] if col in rows and not rows[col].mode().empty else None
+                if col not in product_df.columns or rows.empty:
+                    return None
+                if rows[col].mode().empty:
+                    return None
+                return rows[col].mode().iloc[0]
 
             return pd.Series({
                 "Group": group,
@@ -205,7 +223,9 @@ if adm_file and product_file and store_file:
         if not unmatched_df.empty:
             unmatched_df = pd.concat([unmatched_df, unmatched_df["Description"].apply(infer)], axis=1)
 
-        # NEW: TEMPLATE
+        # ==============================
+        # TEMPLATE
+        # ==============================
         template = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
             "Product Name": unmatched_df["Description"],
@@ -221,19 +241,49 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
-        # EXPORT
+        progress.progress(90)
+
+        # ==============================
+        # EXPORT (CRASH-PROOF)
+        # ==============================
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            pd.DataFrame({"Status":["OK"]}).to_excel(writer, "Status", index=False)
-            merged.to_excel(writer, "Full Output", index=False)
-            good_df.to_excel(writer, "Good To Go", index=False)
-            invalid_df.to_excel(writer, "Invalid", index=False)
-            unmatched_df.to_excel(writer, "Unmatched", index=False)
-            template.to_excel(writer, "Product Template", index=False)
+
+            # ALWAYS FIRST SHEET
+            pd.DataFrame({"Status": ["OK"]}).to_excel(writer, "Status", index=False)
+
+            try:
+                merged.to_excel(writer, "Full Output", index=False)
+            except:
+                pass
+
+            try:
+                good_df.to_excel(writer, "Good To Go", index=False)
+            except:
+                pass
+
+            try:
+                invalid_df.to_excel(writer, "Invalid", index=False)
+            except:
+                pass
+
+            try:
+                unmatched_df.to_excel(writer, "Unmatched", index=False)
+            except:
+                pass
+
+            try:
+                template.to_excel(writer, "Product Template", index=False)
+            except:
+                pass
 
         output.seek(0)
 
         progress.progress(100)
         status.text("✅ Done!")
 
-        st.download_button("📥 Download", output, "processed.xlsx")
+        st.download_button(
+            "📥 Download Processed File",
+            data=output,
+            file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        )
