@@ -33,27 +33,63 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# TYPE + FAMILY HELPERS
+# 🔥 IMPROVED FAMILY INFERENCE
 # ==============================
+def normalize_text(text):
+    return (
+        str(text)
+        .lower()
+        .replace("/", " ")
+        .replace("-", " ")
+        .strip()
+    )
+
 def extract_family(desc, product_df, family_col):
-    desc = str(desc).lower()
+    desc_clean = normalize_text(desc)
+
     families = product_df[family_col].dropna().unique()
 
+    best_match = ""
+    best_score = 0
+
+    desc_words = set(desc_clean.split())
+
     for fam in families:
-        if str(fam).lower() in desc:
-            return fam
+        fam_clean = normalize_text(fam)
+        fam_words = set(fam_clean.split())
+
+        # Guardrail: require at least 1 overlapping word
+        if len(desc_words.intersection(fam_words)) == 0:
+            continue
+
+        score = fuzz.token_set_ratio(desc_clean, fam_clean)
+
+        # Boost if full phrase appears
+        if fam_clean in desc_clean:
+            score += 10
+
+        if score > best_score:
+            best_score = score
+            best_match = fam
+
+    # Threshold (tune if needed)
+    if best_score >= 85:
+        return best_match
+
     return ""
 
 def extract_type(family, product_df):
     if not family or "Type" not in product_df.columns:
         return ""
-    candidates = product_df[product_df["Family"] == family]
+
+    candidates = product_df[
+        product_df["Family"].str.lower() == str(family).lower()
+    ]
+
     if candidates.empty:
         return ""
-    try:
-        return candidates["Type"].mode().iloc[0]
-    except:
-        return ""
+
+    return candidates["Type"].mode().iloc[0]
 
 # ==============================
 # UI
@@ -115,11 +151,6 @@ if adm_file and product_file and store_file:
         main_desc = st.selectbox("Main Description", main_df.columns)
         main_store = st.selectbox("Main Store", main_df.columns)
 
-    st.info("Click Process")
-
-    # ==============================
-    # PROCESS
-    # ==============================
     if st.button("🚀 Process Files"):
 
         progress = st.progress(0)
@@ -158,14 +189,14 @@ if adm_file and product_file and store_file:
 
         def fuzzy_match(row):
 
-            # 1️⃣ UPC match already found
+            # UPC match
             if isinstance(row["All Retail UIDs"], list):
                 return row["All Retail UIDs"], row["All Families"], 100, "UPC Match"
 
             desc = row["desc_clean"]
             upc10 = row["m_10"]
 
-            # 2️⃣ EXACT DESCRIPTION MATCH FIRST (NEW FIX)
+            # EXACT DESCRIPTION MATCH
             exact_desc_matches = product_df[
                 product_df["desc_clean"] == desc
             ]
@@ -178,7 +209,7 @@ if adm_file and product_file and store_file:
                     "Exact Description Match"
                 )
 
-            # 3️⃣ 10 DIGIT + FUZZY
+            # FUZZY MATCH
             candidates = product_df[
                 product_df["p_12_str"].str.contains(upc10, na=False)
             ]
@@ -259,7 +290,7 @@ if adm_file and product_file and store_file:
         summary = merged["Match Type"].value_counts().reset_index()
         summary.columns = ["Match Type", "Count"]
 
-        # TYPE + FAMILY INFERENCE
+        # 🔥 IMPROVED INFERENCE APPLIED HERE
         unmatched_df["Family"] = unmatched_df["Description"].apply(
             lambda x: extract_family(x, product_df, product_family)
         )
