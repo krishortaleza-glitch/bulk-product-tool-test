@@ -10,11 +10,18 @@ st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
 # ==============================
-# LOAD
+# LOAD (CSV + EXCEL SUPPORT)
 # ==============================
 @st.cache_data
 def load_file(file):
-    return pd.read_excel(file)
+    if file.name.endswith(".csv"):
+        df = pd.read_csv(file)
+    else:
+        df = pd.read_excel(file)
+
+    # Clean column names (important for CSVs)
+    df.columns = df.columns.str.strip()
+    return df
 
 # ==============================
 # HELPERS
@@ -30,15 +37,8 @@ def clean_desc(series):
     return series.astype(str).str.lower().str.strip()
 
 def normalize_text(text):
-    return (
-        str(text)
-        .lower()
-        .replace("/", " ")
-        .replace("-", " ")
-        .strip()
-    )
+    return str(text).lower().replace("/", " ").replace("-", " ").strip()
 
-# 🔥 Split unknown tokens using vocab
 def split_token_by_vocab(token, vocab):
     for i in range(1, len(token)):
         left = token[:i]
@@ -47,21 +47,17 @@ def split_token_by_vocab(token, vocab):
             return [left, right]
     return [token]
 
-# 🔥 Improved cleaning
 def clean_for_matching(text, product_vocab=None):
     text = normalize_text(text)
 
-    # Remove packaging noise
     text = re.sub(r"\b\d+/\d+\w*\b", "", text)
     text = re.sub(r"\b\d+\s?(pk|pack|ct)\b", "", text)
     text = re.sub(r"\b\d+(oz|ml|l)\b", "", text)
 
-    # Normalize abbreviations
     text = text.replace("variety", "var")
 
     words = text.split()
 
-    # 🔥 Fix joined words using vocab
     if product_vocab:
         new_words = []
         for w in words:
@@ -79,33 +75,21 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# 🔥 SMART INFERENCE
+# FAMILY INFERENCE
 # ==============================
 def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
-    # Build vocab from product names
     product_vocab = set(
-        " ".join(
-            product_df[product_desc_col]
-            .astype(str)
-            .str.lower()
-            .tolist()
-        ).split()
+        " ".join(product_df[product_desc_col].astype(str).str.lower()).split()
     )
 
     desc_clean = clean_for_matching(desc, product_vocab)
-
-    # 🔒 Strict brand = first word
     brand = desc_clean.split()[0] if desc_clean else ""
 
     filtered_products = product_df[
-        product_df[product_desc_col]
-        .astype(str)
-        .str.lower()
-        .str.contains(rf"\b{brand}\b", na=False)
+        product_df[product_desc_col].astype(str).str.lower().str.contains(rf"\b{brand}\b", na=False)
     ]
 
-    # ❌ If brand not found → return blank
     if filtered_products.empty:
         return "", ""
 
@@ -127,9 +111,7 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
     top_matches = sorted(scored, key=lambda x: x[0], reverse=True)[:10]
 
-    # Extract common words
     word_counter = Counter()
-
     for _, row in top_matches:
         words = clean_for_matching(row[product_desc_col], product_vocab).split()
         word_counter.update(set(words))
@@ -154,13 +136,10 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
             best_score = score
             best_family = fam
 
-    # Infer type
     best_type = ""
-    if best_family:
-        candidates = product_df[
-            product_df[family_col].str.lower() == best_family.lower()
-        ]
-        if not candidates.empty and "Type" in product_df.columns:
+    if best_family and "Type" in product_df.columns:
+        candidates = product_df[product_df[family_col].str.lower() == best_family.lower()]
+        if not candidates.empty:
             best_type = candidates["Type"].mode().iloc[0]
 
     return best_family, best_type
@@ -172,7 +151,7 @@ st.header("Upload Files")
 
 adm_file = st.file_uploader("ADM File", type=["xlsx"])
 product_file = st.file_uploader("Product File", type=["xlsx"])
-store_file = st.file_uploader("Store Assignment File", type=["xlsx"])
+store_file = st.file_uploader("Store Assignment File", type=["xlsx", "csv"])
 
 if adm_file and product_file and store_file:
 
@@ -182,7 +161,6 @@ if adm_file and product_file and store_file:
 
     st.success("Files loaded")
 
-    # Static mappings
     product_upc1 = "ProductUPC"
     product_upc2 = "UnitUPC"
     product_desc = "Product Name"
@@ -192,10 +170,7 @@ if adm_file and product_file and store_file:
     sf_store = "Store"
     sf_family = "Family"
 
-    # Validation
-    required_product_cols = [
-        "ProductUPC", "UnitUPC", "Product Name", "ProductId", "Family"
-    ]
+    required_product_cols = ["ProductUPC", "UnitUPC", "Product Name", "ProductId", "Family"]
     required_sf_cols = ["Store", "Family"]
 
     if any(c not in product_df.columns for c in required_product_cols):
@@ -206,7 +181,6 @@ if adm_file and product_file and store_file:
         st.error("❌ Store Family file format incorrect")
         st.stop()
 
-    # ADM selection
     st.header("Select ADM Columns")
 
     main_upc = st.selectbox("Main UPC", main_df.columns)
@@ -218,7 +192,7 @@ if adm_file and product_file and store_file:
         progress = st.progress(0)
         status = st.empty()
 
-        # STEP 1 CLEAN
+        # CLEAN
         status.text("🔄 Cleaning data...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
@@ -231,7 +205,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(20)
 
-        # STEP 2 UPC MATCH
+        # UPC MATCH
         status.text("🔎 Matching exact UPCs...")
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
@@ -244,9 +218,8 @@ if adm_file and product_file and store_file:
 
         progress.progress(40)
 
-        # STEP 3 MATCHING
+        # MATCHING
         status.text("🧠 Running smart matching...")
-
         product_df["p_12_str"] = product_df["p_12"].astype(str)
 
         def fuzzy_match(row):
@@ -257,9 +230,7 @@ if adm_file and product_file and store_file:
             desc = row["desc_clean"]
             upc10 = row["m_10"]
 
-            exact_desc_matches = product_df[
-                product_df["desc_clean"] == desc
-            ]
+            exact_desc_matches = product_df[product_df["desc_clean"] == desc]
 
             if not exact_desc_matches.empty:
                 return (
@@ -297,7 +268,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(70)
 
-        # STEP 4 STORE FAMILY VALIDATION
+        # STORE FAMILY VALIDATION
         status.text("🏪 Validating store-family...")
 
         merged["Retail UID"] = merged["All Retail UIDs"].apply(
@@ -321,7 +292,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(85)
 
-        # STEP 5 OUTPUT
+        # OUTPUT
         status.text("📊 Building output...")
 
         good_df = merged[
@@ -349,7 +320,7 @@ if adm_file and product_file and store_file:
         summary = merged["Match Type"].value_counts().reset_index()
         summary.columns = ["Match Type", "Count"]
 
-        # 🔥 SMART INFERENCE
+        # FAMILY INFERENCE ONLY
         results = unmatched_df["Description"].apply(
             lambda x: infer_family_smart(x, product_df, product_desc, product_family)
         )
@@ -357,7 +328,7 @@ if adm_file and product_file and store_file:
         unmatched_df["Family"] = results.apply(lambda x: x[0])
         unmatched_df["Type"] = results.apply(lambda x: x[1])
 
-        # TEMPLATE
+        # TEMPLATE (EMPTY CONFIG — NO INFERENCE)
         template_df = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
             "UnitId": "",
