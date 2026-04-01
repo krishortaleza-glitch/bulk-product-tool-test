@@ -4,6 +4,7 @@ from datetime import datetime
 from io import BytesIO
 from rapidfuzz import fuzz
 import re
+from collections import Counter
 
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
@@ -40,7 +41,7 @@ def normalize_text(text):
 def clean_for_matching(text):
     text = normalize_text(text)
 
-    # Remove package noise
+    # Remove packaging noise
     text = re.sub(r"\b\d+/\d+\w*\b", "", text)
     text = re.sub(r"\b\d+\s?(pk|pack|ct)\b", "", text)
     text = re.sub(r"\b\d+(oz|ml|l)\b", "", text)
@@ -53,16 +54,15 @@ def generate_keys(df, col, prefix):
     df[f"{prefix}_10"] = df[f"{prefix}_12"].str[-10:]
 
 # ==============================
-# 🔥 PRODUCT NAME–DRIVEN INFERENCE
+# 🔥 SMART FAMILY + TYPE INFERENCE
 # ==============================
-def infer_from_product_name(desc, product_df, product_desc_col, family_col):
+def infer_family_smart(desc, product_df, product_desc_col, family_col):
 
     desc_clean = clean_for_matching(desc)
 
-    best_score = 0
-    best_family = ""
-    best_type = ""
+    scored = []
 
+    # Step 1: find similar products
     for _, row in product_df.iterrows():
         prod_name = clean_for_matching(row[product_desc_col])
 
@@ -71,19 +71,53 @@ def infer_from_product_name(desc, product_df, product_desc_col, family_col):
             fuzz.partial_ratio(desc_clean, prod_name)
         )
 
-        # Boost strong matches
-        if desc_clean in prod_name or prod_name in desc_clean:
-            score += 10
+        if score >= 70:
+            scored.append((score, row))
+
+    if not scored:
+        return "", ""
+
+    # Step 2: top matches
+    top_matches = sorted(scored, key=lambda x: x[0], reverse=True)[:10]
+
+    # Step 3: extract common words
+    word_counter = Counter()
+
+    for _, row in top_matches:
+        words = clean_for_matching(row[product_desc_col]).split()
+        word_counter.update(set(words))
+
+    common_words = [
+        word for word, count in word_counter.items()
+        if count >= len(top_matches) * 0.6
+    ]
+
+    base_phrase = " ".join(common_words)
+
+    # Step 4: map to best family
+    best_family = ""
+    best_score = 0
+
+    for _, row in top_matches:
+        fam = row[family_col]
+        fam_clean = clean_for_matching(fam)
+
+        score = fuzz.token_set_ratio(base_phrase, fam_clean)
 
         if score > best_score:
             best_score = score
-            best_family = row[family_col]
-            best_type = row["Type"] if "Type" in product_df.columns else ""
+            best_family = fam
 
-    if best_score >= 80:
-        return best_family, best_type, best_score
+    # Step 5: infer type
+    best_type = ""
+    if best_family:
+        candidates = product_df[
+            product_df[family_col].str.lower() == best_family.lower()
+        ]
+        if not candidates.empty and "Type" in product_df.columns:
+            best_type = candidates["Type"].mode().iloc[0]
 
-    return "", "", best_score
+    return best_family, best_type
 
 # ==============================
 # UI
@@ -177,7 +211,7 @@ if adm_file and product_file and store_file:
             desc = row["desc_clean"]
             upc10 = row["m_10"]
 
-            # Exact description match
+            # Exact match
             exact_desc_matches = product_df[
                 product_df["desc_clean"] == desc
             ]
@@ -190,7 +224,7 @@ if adm_file and product_file and store_file:
                     "Exact Description Match"
                 )
 
-            # Fuzzy match
+            # Fuzzy
             candidates = product_df[
                 product_df["p_12_str"].str.contains(upc10, na=False)
             ]
@@ -271,14 +305,13 @@ if adm_file and product_file and store_file:
         summary = merged["Match Type"].value_counts().reset_index()
         summary.columns = ["Match Type", "Count"]
 
-        # 🔥 NEW INFERENCE LOGIC
-        inference_results = unmatched_df["Description"].apply(
-            lambda x: infer_from_product_name(x, product_df, product_desc, product_family)
+        # 🔥 SMART INFERENCE
+        results = unmatched_df["Description"].apply(
+            lambda x: infer_family_smart(x, product_df, product_desc, product_family)
         )
 
-        unmatched_df["Family"] = inference_results.apply(lambda x: x[0])
-        unmatched_df["Type"] = inference_results.apply(lambda x: x[1])
-        unmatched_df["Inference Score"] = inference_results.apply(lambda x: x[2])
+        unmatched_df["Family"] = results.apply(lambda x: x[0])
+        unmatched_df["Type"] = results.apply(lambda x: x[1])
 
         # TEMPLATE
         template_df = pd.DataFrame({
