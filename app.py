@@ -10,19 +10,11 @@ st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
 # ==============================
-# LOAD (UPDATED FOR CSV)
+# LOAD
 # ==============================
 @st.cache_data
 def load_file(file):
-    if file.name.endswith(".csv"):
-        df = pd.read_csv(file)
-    else:
-        df = pd.read_excel(file)
-
-    # 🔥 prevent CSV column issues
-    df.columns = df.columns.str.strip()
-
-    return df
+    return pd.read_excel(file)
 
 # ==============================
 # HELPERS
@@ -180,7 +172,7 @@ st.header("Upload Files")
 
 adm_file = st.file_uploader("ADM File", type=["xlsx"])
 product_file = st.file_uploader("Product File", type=["xlsx"])
-store_file = st.file_uploader("Store Assignment File", type=["xlsx", "csv"])
+store_file = st.file_uploader("Store Assignment File", type=["xlsx"])
 
 if adm_file and product_file and store_file:
 
