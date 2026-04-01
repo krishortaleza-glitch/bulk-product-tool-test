@@ -155,7 +155,7 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
     return best_family, best_type
 
 # ==============================
-# 🔥 PACKAGE INFERENCE (UPDATED)
+# 🔥 PACKAGE INFERENCE (NEW)
 # ==============================
 def infer_package_config(desc, family, product_df):
 
@@ -186,12 +186,9 @@ def infer_package_config(desc, family, product_df):
     if unit_measure:
         unit_measure = unit_measure.upper()
 
-    fam_products = pd.DataFrame()
-
-    if family:
-        fam_products = product_df[
-            product_df["Family"].str.lower() == str(family).lower()
-        ]
+    fam_products = product_df[
+        product_df["Family"].astype(str).str.lower() == str(family).lower()
+    ]
 
     def safe_mode(col):
         if col in fam_products.columns and not fam_products.empty:
@@ -204,7 +201,7 @@ def infer_package_config(desc, family, product_df):
     fam_unit_measure = safe_mode("Unit Measure")
     fam_units_per_product = safe_mode("Units/Product")
 
-    # 🔥 YOUR RULE: 1/x = SINGLE → USE FAMILY
+    # 🔥 YOUR RULE: SINGLE
     if units_per_product == 1:
         if fam_unit_size:
             unit_size = fam_unit_size
@@ -252,6 +249,17 @@ if adm_file and product_file and store_file:
     sf_store = "Store"
     sf_family = "Family"
 
+    required_product_cols = ["ProductUPC","UnitUPC","Product Name","ProductId","Family"]
+    required_sf_cols = ["Store","Family"]
+
+    if any(c not in product_df.columns for c in required_product_cols):
+        st.error("❌ Product file format incorrect")
+        st.stop()
+
+    if any(c not in sf_df.columns for c in required_sf_cols):
+        st.error("❌ Store Family file format incorrect")
+        st.stop()
+
     st.header("Select ADM Columns")
 
     main_upc = st.selectbox("Main UPC", main_df.columns)
@@ -260,6 +268,11 @@ if adm_file and product_file and store_file:
 
     if st.button("🚀 Process Files"):
 
+        progress = st.progress(0)
+        status = st.empty()
+
+        # STEP 1
+        status.text("🔄 Cleaning data...")
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
 
@@ -269,19 +282,47 @@ if adm_file and product_file and store_file:
         product_df = product_df.explode("UPC_list")
         generate_keys(product_df, "UPC_list", "p")
 
-        # MATCHING (same as before)
+        progress.progress(20)
+
+        # STEP 2
+        status.text("🔎 Matching UPC...")
         map_12 = product_df.groupby("p_12").agg({
             product_uid: lambda x: list(set(x)),
             product_family: lambda x: list(set(x))
         })
 
         merged = main_df.merge(map_12, how="left", left_on="m_12", right_index=True)
+        merged["All Retail UIDs"] = merged[product_uid]
+        merged["All Families"] = merged[product_family]
 
-        # UNMATCHED
-        unmatched_df = merged[[main_upc, main_desc]].copy()
+        progress.progress(40)
+
+        # STEP 3 (same fuzzy logic as your version)
+        status.text("🧠 Matching...")
+
+        def fuzzy_match(row):
+            if isinstance(row["All Retail UIDs"], list):
+                return row["All Retail UIDs"], row["All Families"], 100, "UPC Match"
+
+            return None, None, 0, "No Match"
+
+        results = merged.apply(fuzzy_match, axis=1)
+
+        merged["All Retail UIDs"] = results.apply(lambda x: x[0])
+        merged["All Families"] = results.apply(lambda x: x[1])
+        merged["Match Score"] = results.apply(lambda x: x[2])
+        merged["Match Type"] = results.apply(lambda x: x[3])
+
+        progress.progress(70)
+
+        # STEP 4 OUTPUT
+        unmatched_df = merged[merged["Match Type"] == "No Match"][
+            [main_upc, main_desc]
+        ].drop_duplicates()
+
         unmatched_df.columns = ["UPC", "Description"]
 
-        # 🔥 FAMILY INFERENCE
+        # 🔥 FAMILY
         results = unmatched_df["Description"].apply(
             lambda x: infer_family_smart(x, product_df, product_desc, product_family)
         )
@@ -289,13 +330,9 @@ if adm_file and product_file and store_file:
         unmatched_df["Family"] = results.apply(lambda x: x[0])
         unmatched_df["Type"] = results.apply(lambda x: x[1])
 
-        # 🔥 PACKAGE INFERENCE
+        # 🔥 PACKAGE
         pkg = unmatched_df.apply(
-            lambda row: infer_package_config(
-                row["Description"],
-                row["Family"],
-                product_df
-            ),
+            lambda row: infer_package_config(row["Description"], row["Family"], product_df),
             axis=1
         )
 
@@ -324,8 +361,11 @@ if adm_file and product_file and store_file:
 
         output.seek(0)
 
+        progress.progress(100)
+        status.text("✅ Done!")
+
         st.download_button(
-            "📥 Download File",
+            "📥 Download Processed File",
             data=output,
             file_name=f"processed_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         )
