@@ -8,9 +8,6 @@ import tempfile
 st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
-# ==============================
-# LOAD
-# ==============================
 @st.cache_data
 def load_file(file):
     try:
@@ -18,16 +15,12 @@ def load_file(file):
             df = pd.read_csv(file)
         else:
             df = pd.read_excel(file)
-
         df.columns = df.columns.str.strip()
         return df
     except Exception as e:
         st.error(f"Error loading file: {e}")
         return pd.DataFrame()
 
-# ==============================
-# HELPERS
-# ==============================
 def clean_upc(series):
     return (
         series.astype(str)
@@ -41,7 +34,6 @@ def clean_desc(series):
 def normalize_upc_variants(upc):
     upc = re.sub(r"\D", "", str(upc))
     variants = set()
-
     if not upc:
         return variants
 
@@ -49,21 +41,15 @@ def normalize_upc_variants(upc):
 
     if len(upc) == 12:
         variants.add(upc[:11])
-
     if len(upc) == 11:
         variants.add("0" + upc)
-
     if len(upc) == 10:
         variants.add("0" + upc)
-
     if len(upc) < 12:
         variants.add(upc.zfill(12))
 
     return variants
 
-# ==============================
-# FAMILY INFERENCE (UNCHANGED)
-# ==============================
 def infer_family_smart(desc, product_df, product_desc_col, family_col):
     try:
         desc_clean = desc.lower()
@@ -91,9 +77,6 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
     except:
         return "", ""
 
-# ==============================
-# UI
-# ==============================
 st.header("Upload Files")
 
 adm_file = st.file_uploader("ADM File", type=["xlsx"])
@@ -117,9 +100,9 @@ if adm_file and product_file and store_file:
     product_uid = "ProductId"
     product_family = "Family"
 
-    main_upc = st.selectbox("Main UPC", main_df.columns)
-    main_desc = st.selectbox("Main Description", main_df.columns)
-    main_store = st.selectbox("Main Store", main_df.columns)
+    main_upc = st.selectbox("UPC", main_df.columns)
+    main_desc = st.selectbox("Description", main_df.columns)
+    main_store = st.selectbox("Store Number", main_df.columns)
 
     if st.button("🚀 Process Files"):
 
@@ -127,12 +110,11 @@ if adm_file and product_file and store_file:
             progress = st.progress(0)
             status = st.empty()
 
-            # CLEAN
             status.text("Cleaning...")
             main_df["desc_clean"] = clean_desc(main_df[main_desc])
             product_df["desc_clean"] = clean_desc(product_df[product_desc])
 
-            # BUILD UPC TABLE WITH SOURCE
+            # Build UPC table
             rows = []
             for _, r in product_df.iterrows():
                 if pd.notna(r[product_upc1]):
@@ -148,7 +130,6 @@ if adm_file and product_file and store_file:
                     rows.append(row)
 
             product_df = pd.DataFrame(rows)
-
             progress.progress(20)
 
             # UPC MATCH
@@ -161,39 +142,35 @@ if adm_file and product_file and store_file:
                     product_lookup.setdefault(v, []).append(row)
 
             def match_upc(row):
-                try:
-                    upc = clean_upc(pd.Series([row[main_upc]])).iloc[0]
+                upc = clean_upc(pd.Series([row[main_upc]])).iloc[0]
 
-                    matches = []
-                    sources = set()
+                matches = []
+                sources = set()
 
-                    for v in normalize_upc_variants(upc):
-                        if v in product_lookup:
-                            for m in product_lookup[v]:
-                                matches.append(m)
-                                sources.add(m["UPC_SOURCE"])
+                for v in normalize_upc_variants(upc):
+                    if v in product_lookup:
+                        for m in product_lookup[v]:
+                            matches.append(m)
+                            sources.add(m["UPC_SOURCE"])
 
-                    if not matches and len(upc) == 10:
-                        contains = product_df[
-                            product_df["UPC_list"].astype(str).str.contains(upc, na=False)
-                        ]
-                        if not contains.empty:
-                            matches = contains.to_dict("records")
-                            for m in matches:
-                                sources.add(f"Contains({m['UPC_SOURCE']})")
+                if not matches and len(upc) == 10:
+                    contains = product_df[
+                        product_df["UPC_list"].astype(str).str.contains(upc, na=False)
+                    ]
+                    if not contains.empty:
+                        matches = contains.to_dict("records")
+                        for m in matches:
+                            sources.add(f"Contains({m['UPC_SOURCE']})")
 
-                    if not matches:
-                        return None, None, "No Match"
+                if not matches:
+                    return None, None, "No Match"
 
-                    uids = sorted(set([m[product_uid] for m in matches]))
-                    families = list(set([m[product_family] for m in matches]))
+                uids = sorted(set([m[product_uid] for m in matches]))
+                families = list(set([m[product_family] for m in matches]))
 
-                    source_label = list(sources)[0] if len(sources) == 1 else "Mixed"
+                source_label = list(sources)[0] if len(sources) == 1 else "Mixed"
 
-                    return uids, families, source_label
-
-                except:
-                    return None, None, "Error"
+                return uids, families, source_label
 
             upc_results = main_df.apply(match_upc, axis=1)
 
@@ -259,10 +236,11 @@ if adm_file and product_file and store_file:
 
             progress.progress(90)
 
-            # ==============================
             # OUTPUT
-            # ==============================
             status.text("Building output...")
+
+            summary = merged["Match Type"].value_counts().reset_index()
+            summary.columns = ["Match Type", "Count"]
 
             good_df = merged[
                 (merged["Retail UID"].notna()) &
@@ -286,18 +264,35 @@ if adm_file and product_file and store_file:
             ].drop_duplicates()
             invalid_sf_df.columns = ["Store", "Family"]
 
-            summary = merged["Match Type"].value_counts().reset_index()
-            summary.columns = ["Match Type", "Count"]
+            # FAMILY INFERENCE
+            results = unmatched_df["Description"].apply(
+                lambda x: infer_family_smart(x, product_df, product_desc, product_family)
+            )
 
-            # MULTIPLE MATCHES (DEDUPED + EXPANDED)
+            unmatched_df["Family"] = results.apply(lambda x: x[0])
+            unmatched_df["Type"] = results.apply(lambda x: x[1])
+
+            # TEMPLATE
+            template_df = pd.DataFrame({
+                "ProductId": unmatched_df["UPC"],
+                "Product Name": unmatched_df["Description"],
+                "Type": unmatched_df["Type"],
+                "Family": unmatched_df["Family"],
+                "ProductUPC": unmatched_df["UPC"],
+                "Active": "true"
+            })
+
+            # MULTIPLE MATCHES (FULL DEDUPE)
             multi_match_df = merged[
                 merged["All Retail UIDs"].apply(lambda x: isinstance(x, list) and len(x) > 1)
             ][[main_upc, main_desc, "All Retail UIDs"]].copy()
 
             multi_match_df.columns = ["UPC", "Description", "Retail UIDs"]
 
-            # Deduplicate inside lists
             multi_match_df["Retail UIDs"] = multi_match_df["Retail UIDs"].apply(lambda x: sorted(set(x)))
+
+            # REMOVE DUPLICATE ROWS (critical fix)
+            multi_match_df = multi_match_df.drop_duplicates(subset=["UPC", "Description"])
 
             max_len = multi_match_df["Retail UIDs"].apply(len).max() if not multi_match_df.empty else 0
 
@@ -320,6 +315,8 @@ if adm_file and product_file and store_file:
                 unmatched_df.to_excel(writer, sheet_name="Unmatched Products", index=False)
                 invalid_sf_df.to_excel(writer, sheet_name="Invalid Store Family", index=False)
                 multi_match_df.to_excel(writer, sheet_name="Multiple Matches", index=False)
+                template_df.to_excel(writer, sheet_name="Product Template", index=False)
+                
 
             with open(temp_path, "rb") as f:
                 file_bytes = f.read()
