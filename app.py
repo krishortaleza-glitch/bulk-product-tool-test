@@ -141,7 +141,7 @@ def infer_family_smart(desc, product_df, product_desc_col, family_col):
     best_type = ""
     if best_family and "Type" in product_df.columns:
         candidates = product_df[
-            product_df[family_col].str.lower() == best_family.lower()
+            product_df[family_col].astype(str) == str(best_family)
         ]
         if not candidates.empty:
             best_type = candidates["Type"].mode().iloc[0]
@@ -217,6 +217,14 @@ if adm_file and product_file and store_file:
         })
 
         merged = main_df.merge(map_12, how="left", left_on="m_12", right_index=True)
+
+        # ✅ FIX: ensure columns always exist
+        if product_uid not in merged.columns:
+            merged[product_uid] = None
+
+        if product_family not in merged.columns:
+            merged[product_family] = None
+
         merged["All Retail UIDs"] = merged[product_uid]
         merged["All Families"] = merged[product_family]
 
@@ -272,7 +280,7 @@ if adm_file and product_file and store_file:
 
         progress.progress(70)
 
-        # STORE FAMILY VALIDATION
+        # STORE FAMILY VALIDATION (UNCHANGED - CASE SENSITIVE)
         status.text("🏪 Validating store-family...")
 
         merged["Retail UID"] = merged["All Retail UIDs"].apply(
@@ -324,7 +332,6 @@ if adm_file and product_file and store_file:
         summary = merged["Match Type"].value_counts().reset_index()
         summary.columns = ["Match Type", "Count"]
 
-        # FAMILY INFERENCE ONLY
         results = unmatched_df["Description"].apply(
             lambda x: infer_family_smart(x, product_df, product_desc, product_family)
         )
@@ -332,7 +339,6 @@ if adm_file and product_file and store_file:
         unmatched_df["Family"] = results.apply(lambda x: x[0])
         unmatched_df["Type"] = results.apply(lambda x: x[1])
 
-        # TEMPLATE
         template_df = pd.DataFrame({
             "ProductId": unmatched_df["UPC"],
             "UnitId": "",
@@ -353,7 +359,6 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
-        # EXPORT (FIXED)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
             temp_path = tmp.name
 
