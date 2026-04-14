@@ -10,7 +10,7 @@ st.set_page_config(page_title="Bulk Product Request Tool", layout="wide")
 st.title("📦 Bulk Product Request Tool")
 
 # ==============================
-# SAFE LOAD
+# LOAD
 # ==============================
 @st.cache_data
 def load_file(file):
@@ -22,23 +22,19 @@ def load_file(file):
 
         df.columns = df.columns.str.strip()
         return df
-
     except Exception as e:
-        st.error(f"❌ Error loading file: {e}")
+        st.error(f"Error loading file: {e}")
         return pd.DataFrame()
 
 # ==============================
 # HELPERS
 # ==============================
 def clean_upc(series):
-    try:
-        return (
-            series.astype(str)
-            .str.replace(r"\.0$", "", regex=True)
-            .str.replace(r"\D", "", regex=True)
-        )
-    except:
-        return pd.Series([""] * len(series))
+    return (
+        series.astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\D", "", regex=True)
+    )
 
 def clean_desc(series):
     return series.astype(str).str.lower().str.strip()
@@ -56,13 +52,10 @@ def normalize_upc_variants(upc):
         variants.add(upc[:11])
 
     if len(upc) == 11:
-        variants.add(upc)
         variants.add("0" + upc)
 
     if len(upc) == 10:
-        v11 = "0" + upc
-        variants.add(v11)
-        variants.add(upc)
+        variants.add("0" + upc)
 
     if len(upc) < 12:
         variants.add(upc.zfill(12))
@@ -73,32 +66,20 @@ def normalize_upc_variants(upc):
 # FAMILY INFERENCE (UNCHANGED)
 # ==============================
 def infer_family_smart(desc, product_df, product_desc_col, family_col):
-
     try:
-        product_vocab = set(
-            " ".join(product_df[product_desc_col].astype(str).str.lower()).split()
-        )
-
         desc_clean = desc.lower()
-        brand = desc_clean.split()[0] if desc_clean else ""
 
-        filtered = product_df[
-            product_df[product_desc_col].astype(str).str.lower().str.contains(brand, na=False)
-        ]
+        best = None
+        best_score = 0
 
-        if filtered.empty:
-            return "", ""
-
-        scored = []
-        for _, row in filtered.iterrows():
+        for _, row in product_df.iterrows():
             score = fuzz.token_set_ratio(desc_clean, str(row[product_desc_col]).lower())
-            if score >= 70:
-                scored.append((score, row))
+            if score > best_score:
+                best_score = score
+                best = row
 
-        if not scored:
+        if best is None:
             return "", ""
-
-        best = max(scored, key=lambda x: x[0])[1]
 
         fam = best[family_col]
 
@@ -139,8 +120,6 @@ if adm_file and product_file and store_file:
     product_uid = "ProductId"
     product_family = "Family"
 
-    st.header("Select ADM Columns")
-
     main_upc = st.selectbox("Main UPC", main_df.columns)
     main_desc = st.selectbox("Main Description", main_df.columns)
     main_store = st.selectbox("Main Store", main_df.columns)
@@ -156,8 +135,24 @@ if adm_file and product_file and store_file:
             main_df["desc_clean"] = clean_desc(main_df[main_desc])
             product_df["desc_clean"] = clean_desc(product_df[product_desc])
 
-            product_df["UPC_list"] = product_df[[product_upc1, product_upc2]].values.tolist()
-            product_df = product_df.explode("UPC_list")
+            # Tag sources BEFORE explode
+            product_df["UPC_pair"] = product_df[[product_upc1, product_upc2]].values.tolist()
+
+            rows = []
+            for _, r in product_df.iterrows():
+                if pd.notna(r[product_upc1]):
+                    row = r.copy()
+                    row["UPC_list"] = r[product_upc1]
+                    row["UPC_SOURCE"] = "ProductUPC"
+                    rows.append(row)
+
+                if pd.notna(r[product_upc2]):
+                    row = r.copy()
+                    row["UPC_list"] = r[product_upc2]
+                    row["UPC_SOURCE"] = "UnitUPC"
+                    rows.append(row)
+
+            product_df = pd.DataFrame(rows)
 
             progress.progress(20)
 
@@ -170,9 +165,7 @@ if adm_file and product_file and store_file:
 
             for _, row in product_df.iterrows():
                 upc = clean_upc(pd.Series([row["UPC_list"]])).iloc[0]
-                variants = normalize_upc_variants(upc)
-
-                for v in variants:
+                for v in normalize_upc_variants(upc):
                     product_lookup.setdefault(v, []).append(row)
 
             def match_upc(row):
@@ -180,39 +173,50 @@ if adm_file and product_file and store_file:
                     upc = clean_upc(pd.Series([row[main_upc]])).iloc[0]
 
                     if not upc:
-                        return None, None
-
-                    variants = normalize_upc_variants(upc)
+                        return None, None, None
 
                     matches = []
-                    for v in variants:
-                        if v in product_lookup:
-                            matches.extend(product_lookup[v])
+                    sources = set()
 
-                    # 🔥 10-digit contains fallback
+                    for v in normalize_upc_variants(upc):
+                        if v in product_lookup:
+                            for m in product_lookup[v]:
+                                matches.append(m)
+                                sources.add(m["UPC_SOURCE"])
+
+                    # 10-digit contains fallback
                     if not matches and len(upc) == 10:
                         contains = product_df[
                             product_df["UPC_list"].astype(str).str.contains(upc, na=False)
                         ]
+
                         if not contains.empty:
                             matches = contains.to_dict("records")
+                            for m in matches:
+                                sources.add(f"Contains({m['UPC_SOURCE']})")
 
                     if not matches:
-                        return None, None
+                        return None, None, "No Match"
 
-                    uids = list(set([m[product_uid] for m in matches if product_uid in m]))
-                    families = list(set([m[product_family] for m in matches if product_family in m]))
+                    uids = list(set([m[product_uid] for m in matches]))
+                    families = list(set([m[product_family] for m in matches]))
 
-                    return uids, families
+                    if len(sources) == 1:
+                        source_label = list(sources)[0]
+                    else:
+                        source_label = "Mixed"
+
+                    return uids, families, source_label
 
                 except:
-                    return None, None
+                    return None, None, "Error"
 
-            results = main_df.apply(match_upc, axis=1)
+            upc_results = main_df.apply(match_upc, axis=1)
 
             merged = main_df.copy()
-            merged["All Retail UIDs"] = results.apply(lambda x: x[0])
-            merged["All Families"] = results.apply(lambda x: x[1])
+            merged["All Retail UIDs"] = upc_results.apply(lambda x: x[0])
+            merged["All Families"] = upc_results.apply(lambda x: x[1])
+            merged["Match Source"] = upc_results.apply(lambda x: x[2])
 
             progress.progress(50)
 
@@ -224,7 +228,7 @@ if adm_file and product_file and store_file:
             def fuzzy_match(row):
                 try:
                     if isinstance(row["All Retail UIDs"], list):
-                        return row["All Retail UIDs"], row["All Families"], 100, "UPC Match"
+                        return row["All Retail UIDs"], row["All Families"], 100, "UPC Match", row["Match Source"]
 
                     desc = row["desc_clean"]
 
@@ -235,13 +239,14 @@ if adm_file and product_file and store_file:
                             list(set(exact[product_uid])),
                             list(set(exact[product_family])),
                             100,
-                            "Exact Description Match"
+                            "Exact Description Match",
+                            "Description Match"
                         )
 
-                    return None, None, 0, "No Match"
+                    return None, None, 0, "No Match", "No Match"
 
                 except:
-                    return None, None, 0, "Error"
+                    return None, None, 0, "Error", "Error"
 
             results = merged.apply(fuzzy_match, axis=1)
 
@@ -249,6 +254,7 @@ if adm_file and product_file and store_file:
             merged["All Families"] = results.apply(lambda x: x[1])
             merged["Match Score"] = results.apply(lambda x: x[2])
             merged["Match Type"] = results.apply(lambda x: x[3])
+            merged["Match Source"] = results.apply(lambda x: x[4])
 
             progress.progress(75)
 
@@ -283,21 +289,32 @@ if adm_file and product_file and store_file:
             # ==============================
             status.text("Building output...")
 
-            unmatched_df = merged[merged["Match Type"] == "No Match"][
-                [main_upc, main_desc]
-            ].drop_duplicates()
+            summary = merged["Match Type"].value_counts().reset_index()
+            summary.columns = ["Match Type", "Count"]
 
-            unmatched_df["Family"], unmatched_df["Type"] = zip(*[
-                infer_family_smart(x, product_df, product_desc, product_family)
-                for x in unmatched_df[main_desc]
-            ])
+            # MULTIPLE MATCHES
+            multi_match_df = merged[
+                merged["All Retail UIDs"].apply(lambda x: isinstance(x, list) and len(x) > 1)
+            ][[main_upc, main_desc, "All Retail UIDs"]].copy()
+
+            multi_match_df.columns = ["UPC", "Description", "Retail UIDs"]
+
+            max_len = multi_match_df["Retail UIDs"].apply(lambda x: len(x)).max() if not multi_match_df.empty else 0
+
+            for i in range(max_len):
+                multi_match_df[f"Retail UID {i+1}"] = multi_match_df["Retail UIDs"].apply(
+                    lambda x: x[i] if len(x) > i else None
+                )
+
+            multi_match_df = multi_match_df.drop(columns=["Retail UIDs"])
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                 temp_path = tmp.name
 
             with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
                 merged.to_excel(writer, sheet_name="Full Output", index=False)
-                unmatched_df.to_excel(writer, sheet_name="Unmatched", index=False)
+                summary.to_excel(writer, sheet_name="Summary", index=False)
+                multi_match_df.to_excel(writer, sheet_name="Multiple Matches", index=False)
 
             with open(temp_path, "rb") as f:
                 file_bytes = f.read()
@@ -312,4 +329,4 @@ if adm_file and product_file and store_file:
             )
 
         except Exception as e:
-            st.error(f"❌ Critical error: {e}")
+            st.error(f"Critical error: {e}")
