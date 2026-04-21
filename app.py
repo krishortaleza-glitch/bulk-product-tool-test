@@ -86,7 +86,7 @@ if adm_file and product_file and store_file:
         progress.progress(10)
 
         # ==============================
-        # BUILD PRODUCT TABLE (FAST)
+        # BUILD PRODUCT TABLE
         # ==============================
         status.text("Preparing product lookup...")
 
@@ -104,7 +104,7 @@ if adm_file and product_file and store_file:
         progress.progress(25)
 
         # ==============================
-        # UPC MATCH (FIXED + FAST)
+        # UPC MATCH (FIXED)
         # ==============================
         status.text("Matching UPCs...")
 
@@ -137,13 +137,17 @@ if adm_file and product_file and store_file:
         progress.progress(50)
 
         # ==============================
-        # DESCRIPTION MATCH (EXACT ONLY)
+        # DESCRIPTION MATCH (FIXED)
         # ==============================
         status.text("Matching descriptions...")
 
         unmatched_mask = main_df["All Retail UIDs"].isna()
 
-        product_desc_map = product_df.set_index("desc_clean")[[product_uid, product_family]].to_dict("index")
+        product_desc_dedup = product_df.drop_duplicates(subset=["desc_clean"])
+
+        product_desc_map = product_desc_dedup.set_index("desc_clean")[
+            [product_uid, product_family]
+        ].to_dict("index")
 
         def map_desc(x):
             return product_desc_map.get(x)
@@ -158,7 +162,9 @@ if adm_file and product_file and store_file:
             lambda x: [x[product_family]] if isinstance(x, dict) else None
         )
 
-        main_df["Match Score"] = main_df["All Retail UIDs"].apply(lambda x: 100 if isinstance(x, list) else 0)
+        main_df["Match Score"] = main_df["All Retail UIDs"].apply(
+            lambda x: 100 if isinstance(x, list) else 0
+        )
 
         main_df["Match Type"] = main_df["All Retail UIDs"].apply(
             lambda x: "UPC Match" if isinstance(x, list) else "No Match"
