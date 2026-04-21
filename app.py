@@ -73,16 +73,23 @@ if adm_file and product_file and store_file:
         progress = st.progress(0)
         status = st.empty()
 
+        # ==============================
         # CLEAN
+        # ==============================
         status.text("Cleaning...")
+
         main_df["desc_clean"] = clean_desc(main_df[main_desc])
         product_df["desc_clean"] = clean_desc(product_df[product_desc])
 
         main_df["UPC_clean"] = clean_upc(main_df[main_upc])
 
+        progress.progress(10)
+
         # ==============================
-        # BUILD PRODUCT TABLE (VECTORIZED)
+        # BUILD PRODUCT TABLE (FAST)
         # ==============================
+        status.text("Preparing product lookup...")
+
         product_df_1 = product_df[[product_uid, product_family, product_desc, product_upc1]].copy()
         product_df_1["UPC_clean"] = clean_upc(product_df_1[product_upc1])
         product_df_1["UPC_SOURCE"] = "ProductUPC"
@@ -94,12 +101,14 @@ if adm_file and product_file and store_file:
         product_df_all = pd.concat([product_df_1, product_df_2], ignore_index=True)
         product_df_all = product_df_all.dropna(subset=["UPC_clean"])
 
-        progress.progress(20)
+        progress.progress(25)
 
         # ==============================
-        # UPC MATCH (VECTOR JOIN)
+        # UPC MATCH (FIXED + FAST)
         # ==============================
         status.text("Matching UPCs...")
+
+        main_df["_orig_index"] = main_df.index
 
         merged = main_df.merge(
             product_df_all,
@@ -107,38 +116,53 @@ if adm_file and product_file and store_file:
             how="left"
         )
 
-        # Aggregate matches
-        agg = merged.groupby(main_df.index).agg({
+        agg = merged.groupby("_orig_index").agg({
             product_uid: lambda x: list(pd.unique(x.dropna())),
             product_family: lambda x: list(pd.unique(x.dropna())),
             "UPC_SOURCE": lambda x: list(pd.unique(x.dropna()))
         })
 
-        main_df["All Retail UIDs"] = agg[product_uid]
-        main_df["All Families"] = agg[product_family]
-        main_df["Match Source"] = agg["UPC_SOURCE"].apply(
-            lambda x: x[0] if isinstance(x, list) and len(x) == 1 else ("Mixed" if isinstance(x, list) else "No Match")
+        main_df["All Retail UIDs"] = main_df["_orig_index"].map(agg[product_uid])
+        main_df["All Families"] = main_df["_orig_index"].map(agg[product_family])
+
+        def format_source(x):
+            if isinstance(x, list):
+                return x[0] if len(x) == 1 else "Mixed"
+            return "No Match"
+
+        main_df["Match Source"] = main_df["_orig_index"].map(
+            agg["UPC_SOURCE"].apply(format_source)
         )
 
         progress.progress(50)
 
         # ==============================
-        # DESCRIPTION MATCH (LIMITED)
+        # DESCRIPTION MATCH (EXACT ONLY)
         # ==============================
         status.text("Matching descriptions...")
 
         unmatched_mask = main_df["All Retail UIDs"].isna()
-        unmatched = main_df[unmatched_mask]
 
-        product_desc_map = product_df.set_index("desc_clean")[[product_uid, product_family]]
+        product_desc_map = product_df.set_index("desc_clean")[[product_uid, product_family]].to_dict("index")
 
-        exact_matches = unmatched["desc_clean"].map(product_desc_map.to_dict("index"))
+        def map_desc(x):
+            return product_desc_map.get(x)
 
-        main_df.loc[unmatched_mask, "All Retail UIDs"] = exact_matches.apply(lambda x: [x[product_uid]] if isinstance(x, dict) else None)
-        main_df.loc[unmatched_mask, "All Families"] = exact_matches.apply(lambda x: [x[product_family]] if isinstance(x, dict) else None)
+        desc_matches = main_df.loc[unmatched_mask, "desc_clean"].map(map_desc)
+
+        main_df.loc[unmatched_mask, "All Retail UIDs"] = desc_matches.apply(
+            lambda x: [x[product_uid]] if isinstance(x, dict) else None
+        )
+
+        main_df.loc[unmatched_mask, "All Families"] = desc_matches.apply(
+            lambda x: [x[product_family]] if isinstance(x, dict) else None
+        )
 
         main_df["Match Score"] = main_df["All Retail UIDs"].apply(lambda x: 100 if isinstance(x, list) else 0)
-        main_df["Match Type"] = main_df["All Retail UIDs"].apply(lambda x: "Matched" if isinstance(x, list) else "No Match")
+
+        main_df["Match Type"] = main_df["All Retail UIDs"].apply(
+            lambda x: "UPC Match" if isinstance(x, list) else "No Match"
+        )
 
         progress.progress(75)
 
@@ -147,11 +171,21 @@ if adm_file and product_file and store_file:
         # ==============================
         status.text("Validating store-family...")
 
-        main_df["Retail UID"] = main_df["All Retail UIDs"].apply(lambda x: x[0] if isinstance(x, list) else None)
-        main_df["Family"] = main_df["All Families"].apply(lambda x: x[0] if isinstance(x, list) else None)
+        main_df["Retail UID"] = main_df["All Retail UIDs"].apply(
+            lambda x: x[0] if isinstance(x, list) else None
+        )
 
-        main_df["store_family_key"] = main_df[main_store].astype(str) + "|" + main_df["Family"].astype(str)
-        sf_df["store_family_key"] = sf_df["Store"].astype(str) + "|" + sf_df["Family"].astype(str)
+        main_df["Family"] = main_df["All Families"].apply(
+            lambda x: x[0] if isinstance(x, list) else None
+        )
+
+        main_df["store_family_key"] = (
+            main_df[main_store].astype(str) + "|" + main_df["Family"].astype(str)
+        )
+
+        sf_df["store_family_key"] = (
+            sf_df["Store"].astype(str) + "|" + sf_df["Family"].astype(str)
+        )
 
         valid_keys = set(sf_df["store_family_key"])
         main_df["Valid Store-Family"] = main_df["store_family_key"].isin(valid_keys)
@@ -159,23 +193,33 @@ if adm_file and product_file and store_file:
         progress.progress(90)
 
         # ==============================
-        # OUTPUTS (UNCHANGED LOGIC)
+        # OUTPUTS
         # ==============================
         status.text("Building output...")
 
         summary = main_df["Match Type"].value_counts().reset_index()
         summary.columns = ["Match Type", "Count"]
 
-        good_df = main_df[(main_df["Retail UID"].notna()) & (main_df["Valid Store-Family"])][[main_store, "Retail UID"]].drop_duplicates()
+        good_df = main_df[
+            (main_df["Retail UID"].notna()) &
+            (main_df["Valid Store-Family"])
+        ][[main_store, "Retail UID"]].drop_duplicates()
         good_df.columns = ["Store", "Retail UID"]
 
-        invalid_df = main_df[(main_df["Retail UID"].isna()) | (~main_df["Valid Store-Family"])][[main_store, main_upc, main_desc]]
+        invalid_df = main_df[
+            (main_df["Retail UID"].isna()) |
+            (~main_df["Valid Store-Family"])
+        ][[main_store, main_upc, main_desc]]
         invalid_df.columns = ["Store", "UPC", "Description"]
 
-        unmatched_df = main_df[main_df["Match Type"] == "No Match"][[main_upc, main_desc]].drop_duplicates()
+        unmatched_df = main_df[main_df["Match Type"] == "No Match"][
+            [main_upc, main_desc]
+        ].drop_duplicates()
         unmatched_df.columns = ["UPC", "Description"]
 
-        invalid_sf_df = main_df[~main_df["Valid Store-Family"]][[main_store, "Family"]].drop_duplicates()
+        invalid_sf_df = main_df[~main_df["Valid Store-Family"]][
+            [main_store, "Family"]
+        ].drop_duplicates()
         invalid_sf_df.columns = ["Store", "Family"]
 
         # TEMPLATE
@@ -199,16 +243,21 @@ if adm_file and product_file and store_file:
             "Family Head": "false"
         })
 
-        # MULTI MATCH
-        multi_match_df = main_df[main_df["All Retail UIDs"].apply(lambda x: isinstance(x, list) and len(x) > 1)][[main_upc, main_desc, "All Retail UIDs"]].copy()
+        # MULTIPLE MATCHES
+        multi_match_df = main_df[
+            main_df["All Retail UIDs"].apply(lambda x: isinstance(x, list) and len(x) > 1)
+        ][[main_upc, main_desc, "All Retail UIDs"]].copy()
 
         multi_match_df.columns = ["UPC", "Description", "Retail UIDs"]
+
         multi_match_df["Retail UIDs"] = multi_match_df["Retail UIDs"].apply(lambda x: sorted(set(x)))
 
         max_len = multi_match_df["Retail UIDs"].apply(len).max() if not multi_match_df.empty else 0
 
         for i in range(max_len):
-            multi_match_df[f"Retail UID {i+1}"] = multi_match_df["Retail UIDs"].apply(lambda x: x[i] if len(x) > i else None)
+            multi_match_df[f"Retail UID {i+1}"] = multi_match_df["Retail UIDs"].apply(
+                lambda x: x[i] if len(x) > i else None
+            )
 
         multi_match_df = multi_match_df.drop(columns=["Retail UIDs"])
 
