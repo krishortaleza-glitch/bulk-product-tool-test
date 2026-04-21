@@ -38,6 +38,11 @@ def clean_upc(series):
 def clean_desc(series):
     return series.astype(str).str.lower().str.strip()
 
+def safe_first(x):
+    if isinstance(x, list) and len(x) > 0:
+        return x[0]
+    return None
+
 # ==============================
 # UI
 # ==============================
@@ -104,7 +109,7 @@ if adm_file and product_file and store_file:
         progress.progress(25)
 
         # ==============================
-        # UPC MATCH (FIXED)
+        # UPC MATCH
         # ==============================
         status.text("Matching UPCs...")
 
@@ -137,7 +142,7 @@ if adm_file and product_file and store_file:
         progress.progress(50)
 
         # ==============================
-        # DESCRIPTION MATCH (FIXED)
+        # DESCRIPTION MATCH
         # ==============================
         status.text("Matching descriptions...")
 
@@ -177,13 +182,8 @@ if adm_file and product_file and store_file:
         # ==============================
         status.text("Validating store-family...")
 
-        main_df["Retail UID"] = main_df["All Retail UIDs"].apply(
-            lambda x: x[0] if isinstance(x, list) else None
-        )
-
-        main_df["Family"] = main_df["All Families"].apply(
-            lambda x: x[0] if isinstance(x, list) else None
-        )
+        main_df["Retail UID"] = main_df["All Retail UIDs"].apply(safe_first)
+        main_df["Family"] = main_df["All Families"].apply(safe_first)
 
         main_df["store_family_key"] = (
             main_df[main_store].astype(str) + "|" + main_df["Family"].astype(str)
